@@ -1,0 +1,23 @@
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi
+
+secret:
+  name: events-stack-db # Name of the Kubernetes Secret containing DB_USER and DB_PASS keys for database credentials
+
+config:
+  DEBUG: "true"
+  
+  DB_HOST: postgres.demo-system.svc.cluster.local
+  DB_PORT: "5432"
+  DB_USER: test
+  DB_PASS: test
+  DB_NAME: testdb
+  DB_PARAMS: "sslmode=disable&connect_timeout=5"
+
+  NAMESPACES: "krateo-system"
+  PORT: "8082"
