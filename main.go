@@ -12,11 +12,14 @@ import (
 	"github.com/krateoplatformops/plumbing/kubeutil"
 	"github.com/krateoplatformops/resources-ingester/internal/batch"
 	"github.com/krateoplatformops/resources-ingester/internal/config"
+	"github.com/krateoplatformops/resources-ingester/internal/manager"
 	"github.com/krateoplatformops/resources-ingester/internal/queue"
 	"github.com/krateoplatformops/resources-ingester/internal/router"
 
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
+
+	"github.com/krateoplatformops/plumbing/eventbus"
 )
 
 const (
@@ -80,6 +83,20 @@ func main() {
 	jobQueue.Run()
 	defer jobQueue.Terminate()
 
+	// EventBus for components comunication
+	eventbus := eventbus.New()
+
+	// Informer Manager
+	manager, err := manager.NewManager(manager.ManagerOpts{
+		Eventbus: eventbus,
+		Log:      cfg.Log,
+	})
+	if err != nil {
+		cfg.Log.Error("cannot create manager", slog.Any("err", err))
+		os.Exit(1)
+	}
+	go manager.Run(rootCtx.Done())
+
 	// Ingester
 	ing, err := router.NewIngester(router.IngesterOpts{
 		RESTConfig:  restConfig,
@@ -88,6 +105,7 @@ func main() {
 		Log:         cfg.Log,
 		RecordChan:  recordChan,
 		ClusterName: clusterName,
+		EventBus:    eventbus,
 	})
 	if err != nil {
 		cfg.Log.Error("cannot create ingester", slog.Any("err", err))

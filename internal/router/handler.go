@@ -1,11 +1,14 @@
 package router
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/krateoplatformops/plumbing/eventbus"
 	"github.com/krateoplatformops/resources-ingester/internal/batch"
+	"github.com/krateoplatformops/resources-ingester/internal/manager"
 	"github.com/krateoplatformops/resources-ingester/internal/objects"
 	"github.com/krateoplatformops/resources-ingester/internal/queue"
 	corev1 "k8s.io/api/core/v1"
@@ -20,6 +23,7 @@ type IngesterOpts struct {
 	Log         *slog.Logger
 	RecordChan  chan<- batch.InsertRecord // NEW
 	ClusterName string                    // opzionale ma utile
+	EventBus    eventbus.Bus
 }
 
 func NewIngester(opts IngesterOpts) (EventHandler, error) {
@@ -34,6 +38,7 @@ func NewIngester(opts IngesterOpts) (EventHandler, error) {
 		log:            opts.Log,
 		recordChan:     opts.RecordChan,
 		clusterName:    opts.ClusterName,
+		eventbus:       opts.EventBus,
 	}, nil
 }
 
@@ -46,6 +51,7 @@ type ingester struct {
 	log            *slog.Logger
 	recordChan     chan<- batch.InsertRecord
 	clusterName    string
+	eventbus       eventbus.Bus
 }
 
 func (ing *ingester) Handle(obj *unstructured.Unstructured, op Operation) {
@@ -74,6 +80,11 @@ func (ing *ingester) Handle(obj *unstructured.Unstructured, op Operation) {
 		slog.String("kind", obj.GetKind()),
 		slog.String("compositionId", compositionId),
 	)
+
+	ing.eventbus.PublishAsync(context.Background(), manager.InformerCreateEventCrd{
+		Name: obj.GetName(),
+		Obj:  *obj,
+	})
 
 	/*rec := ing.buildRecord(obj, compositionId)
 	if rec.UID == "" {
