@@ -34,6 +34,9 @@ type Router struct {
 	informers      []cache.SharedInformer
 	throttlePeriod time.Duration
 	log            *slog.Logger
+
+	namespaces []string
+	Gvr        schema.GroupVersionResource
 }
 
 type RouterOpts struct {
@@ -44,9 +47,9 @@ type RouterOpts struct {
 	ThrottlePeriod time.Duration
 
 	// Multiple namespaces or nil -> watch everything
-	Namespaces   []string
-	GroupVersion string
-	Resource     string
+	Namespaces []string
+	Gvr        schema.GroupVersionResource
+	Resource   string
 }
 
 func NewRouter(opts RouterOpts) *Router {
@@ -58,16 +61,7 @@ func NewRouter(opts RouterOpts) *Router {
 	var informers []cache.SharedInformer
 	for _, ns := range namespaces {
 		f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(opts.DynamicClient, 0, ns, nil)
-		gv, err := schema.ParseGroupVersion(opts.GroupVersion)
-		if err != nil {
-			opts.Log.Error("parsing gv", "gv", opts.GroupVersion)
-		}
-		gvr := schema.GroupVersionResource{
-			Group:    gv.Group,
-			Version:  gv.Version,
-			Resource: opts.Resource,
-		}
-		i := f.ForResource(gvr)
+		i := f.ForResource(opts.Gvr)
 		informers = append(informers, i.Informer())
 	}
 
@@ -76,6 +70,8 @@ func NewRouter(opts RouterOpts) *Router {
 		handler:        opts.Handler,
 		throttlePeriod: opts.ThrottlePeriod,
 		log:            opts.Log,
+		namespaces:     opts.Namespaces,
+		Gvr:            opts.Gvr,
 	}
 }
 
@@ -102,21 +98,26 @@ func (or *Router) Run(stop <-chan struct{}) {
 		}
 	}
 
-	or.log.Info("Router started")
+	or.log.Info("Router started", "gvr", or.Gvr.String())
 	<-stop
-	or.log.Info("Router stopped")
+	or.log.Info("Router stopped", "gvr", or.Gvr.String())
 }
 
-func (or *Router) OnAdd(obj interface{}) {
-	objUn := obj.(*unstructured.Unstructured)
+func (or *Router) OnAdd(obj any) {
+	objUn, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		or.log.Error("OnCreate: unexpected object type", "type", fmt.Sprintf("%T", obj))
+		return
+	}
 	or.onEvent(objUn, CREATE)
 }
 
 // Dedup by ResourceVersion to prevent noisy updates
-func (or *Router) OnUpdate(oldObj, newObj interface{}) {
+func (or *Router) OnUpdate(oldObj, newObj any) {
 	oldObjUn, ok1 := oldObj.(*unstructured.Unstructured)
 	newObjUn, ok2 := newObj.(*unstructured.Unstructured)
 	if !ok1 || !ok2 {
+		or.log.Error("OnUpdate: unexpected object type", "type old", fmt.Sprintf("%T", oldObj), "type new", fmt.Sprintf("%T", newObj))
 		return
 	}
 
@@ -128,12 +129,21 @@ func (or *Router) OnUpdate(oldObj, newObj interface{}) {
 	or.onEvent(newObjUn, UPDATE)
 }
 
-// Tombstone-safe delete
 func (or *Router) OnDelete(obj any) {
-	objUn := obj.(*unstructured.Unstructured)
+	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = tombstone.Obj
+	}
+
+	objUn, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		or.log.Error("OnDelete: unexpected object type", "type", fmt.Sprintf("%T", obj))
+		return
+	}
+
 	or.onEvent(objUn, DELETE)
 }
 
 func (or *Router) onEvent(objUn *unstructured.Unstructured, op Operation) {
+	//or.log.Info("onEvent called", "obj", objUn.GetName(), "op", op)
 	or.handler.Handle(objUn, op)
 }

@@ -2,16 +2,13 @@ package router
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/krateoplatformops/plumbing/eventbus"
 	"github.com/krateoplatformops/resources-ingester/internal/batch"
-	"github.com/krateoplatformops/resources-ingester/internal/manager"
 	"github.com/krateoplatformops/resources-ingester/internal/objects"
 	"github.com/krateoplatformops/resources-ingester/internal/queue"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/rest"
 )
@@ -55,35 +52,36 @@ type ingester struct {
 }
 
 func (ing *ingester) Handle(obj *unstructured.Unstructured, op Operation) {
-	ref := &corev1.ObjectReference{
-		Kind:            obj.GetKind(),
-		APIVersion:      obj.GetAPIVersion(),
-		Name:            obj.GetName(),
-		Namespace:       obj.GetNamespace(),
-		UID:             obj.GetUID(),
-		ResourceVersion: obj.GetResourceVersion(),
-	}
-	compositionId, err := findCompositionID(ing.objectResolver, ref, ing.log)
-	if err != nil {
-		if !errors.Is(err, ErrCompositionIdNotFound) {
-			ing.log.Error("unable to look for composition id",
-				slog.String("obj", ref.Name),
-				slog.Any("err", err),
-			)
-			return
-		}
-	}
+	// ref := &corev1.ObjectReference{
+	// 	Kind:            obj.GetKind(),
+	// 	APIVersion:      obj.GetAPIVersion(),
+	// 	Name:            obj.GetName(),
+	// 	Namespace:       obj.GetNamespace(),
+	// 	UID:             obj.GetUID(),
+	// 	ResourceVersion: obj.GetResourceVersion(),
+	// }
+	// compositionId, err := findCompositionID(ing.objectResolver, ref, ing.log)
+	// if err != nil {
+	// 	if !errors.Is(err, ErrCompositionIdNotFound) {
+	// 		ing.log.Error("unable to look for composition id",
+	// 			slog.String("obj", ref.Name),
+	// 			slog.Any("err", err),
+	// 		)
+	// 		return
+	// 	}
+	// }
 
-	ing.log.Debug("Handling informer event for object",
-		slog.String("name", obj.GetName()),
-		slog.String("apiversion", obj.GetAPIVersion()),
-		slog.String("kind", obj.GetKind()),
-		slog.String("compositionId", compositionId),
-	)
+	// ing.log.Debug("Handling informer event for object",
+	// 	slog.String("name", obj.GetName()),
+	// 	slog.String("apiversion", obj.GetAPIVersion()),
+	// 	slog.String("kind", obj.GetKind()),
+	// 	slog.String("compositionId", compositionId),
+	// )
 
-	ing.eventbus.PublishAsync(context.Background(), manager.InformerCreateEventCrd{
-		Name: obj.GetName(),
-		Obj:  *obj,
+	ing.eventbus.PublishAsync(context.Background(), InformerEvent{
+		Name:      obj.GetName(),
+		EventType: op,
+		Obj:       *obj,
 	})
 
 	/*rec := ing.buildRecord(obj, compositionId)

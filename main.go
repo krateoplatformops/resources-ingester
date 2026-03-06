@@ -16,6 +16,7 @@ import (
 	"github.com/krateoplatformops/resources-ingester/internal/queue"
 	"github.com/krateoplatformops/resources-ingester/internal/router"
 
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 
@@ -23,8 +24,9 @@ import (
 )
 
 const (
-	crdGroupVersion = "apiextensions.k8s.io/v1"
-	crdResourceName = "customresourcedefinitions"
+	crdGroup    = "apiextensions.k8s.io"
+	crdVersion  = "v1"
+	crdResource = "customresourcedefinitions"
 )
 
 func main() {
@@ -86,17 +88,6 @@ func main() {
 	// EventBus for components comunication
 	eventbus := eventbus.New()
 
-	// Informer Manager
-	manager, err := manager.NewManager(manager.ManagerOpts{
-		Eventbus: eventbus,
-		Log:      cfg.Log,
-	})
-	if err != nil {
-		cfg.Log.Error("cannot create manager", slog.Any("err", err))
-		os.Exit(1)
-	}
-	go manager.Run(rootCtx.Done())
-
 	// Ingester
 	ing, err := router.NewIngester(router.IngesterOpts{
 		RESTConfig:  restConfig,
@@ -112,7 +103,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	// EventRouter
+	// Informer Manager
+	infManager, err := manager.NewManager(manager.ManagerOpts{
+		DynamicClient:  client,
+		Namespaces:     cfg.Namespaces,
+		ResyncInterval: 30 * time.Second, // TODO make configurable
+		ThrottlePeriod: 5 * time.Minute,  // TODO make configurable
+		Eventbus:       eventbus,
+		Log:            cfg.Log,
+		Handler:        ing,
+	})
+	if err != nil {
+		cfg.Log.Error("cannot create manager", slog.Any("err", err))
+		os.Exit(1)
+	}
+	go infManager.Run(rootCtx.Done())
+
+	// Default Router for CRDs
 	crdsRouter := router.NewRouter(router.RouterOpts{
 		DynamicClient:  client,
 		Log:            cfg.Log,
@@ -120,8 +127,11 @@ func main() {
 		ResyncInterval: 30 * time.Second, // TODO make configurable
 		ThrottlePeriod: 5 * time.Minute,  // TODO make configurable
 		Namespaces:     []string{},
-		GroupVersion:   crdGroupVersion,
-		Resource:       crdResourceName,
+		Gvr: schema.GroupVersionResource{
+			Group:    crdGroup,
+			Version:  crdVersion,
+			Resource: crdResource,
+		},
 	})
 	go crdsRouter.Run(rootCtx.Done())
 
@@ -138,6 +148,7 @@ func main() {
 				cfg.Log.Info("Pipeline status",
 					slog.Int("recordChan", len(recordChan)),
 					slog.Int("queueJobs", jobQueue.GetJobCount()),
+					slog.Int("activeInformers", infManager.GetInformers()),
 				)
 			}
 		}
