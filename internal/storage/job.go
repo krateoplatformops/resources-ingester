@@ -1,4 +1,4 @@
-package router
+package storage
 
 import (
 	"context"
@@ -9,16 +9,6 @@ import (
 	"github.com/krateoplatformops/resources-ingester/internal/queue"
 	corev1 "k8s.io/api/core/v1"
 )
-
-func newInsertJob(pool *pgxpool.Pool,
-	log *slog.Logger,
-	eventInfo corev1.Event) queue.Jober {
-	return &insertJob{
-		pool:      pool,
-		log:       log,
-		eventInfo: eventInfo,
-	}
-}
 
 var _ queue.Jober = (*insertJob)(nil)
 
@@ -58,23 +48,16 @@ func (ij *insertJob) Job() {
 		context.Background(),
 		`
 INSERT INTO k8s_events (
-    created_at,
     cluster_name,
     namespace,
     resource_kind,
     resource_name,
-    event_type,
-    reason,
-    message,
     composition_id,
     raw,
     uid,
     resource_version
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8,
-    NULLIF($9, ''),
-    $10,
-    $11, $12
+    $1, $2, $3, $4, NULLIF($5, ''), $6, $7, $8
 )
 ON CONFLICT (uid, resource_version) DO NOTHING;
 `,

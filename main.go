@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/krateoplatformops/resources-ingester/internal/manager"
 	"github.com/krateoplatformops/resources-ingester/internal/queue"
 	"github.com/krateoplatformops/resources-ingester/internal/router"
+	"github.com/krateoplatformops/resources-ingester/internal/storage"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -35,7 +37,7 @@ func main() {
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	router.StartCacheCleaner(rootCtx, 2*time.Minute)
+	storage.StartCacheCleaner(rootCtx, 2*time.Minute)
 
 	/*pgCtx, cancel := context.WithTimeout(rootCtx, cfg.DbReadyTimeout)
 	defer cancel()
@@ -88,30 +90,48 @@ func main() {
 	// EventBus for components comunication
 	eventbus := eventbus.New()
 
-	// Ingester
-	ing, err := router.NewIngester(router.IngesterOpts{
+	// Storage event reader
+	storageManager, err := storage.NewManager(storage.StorageOpts{
 		RESTConfig:  restConfig,
-		Queue:       jobQueue,
 		Pool:        pool,
+		Eventbus:    eventbus,
 		Log:         cfg.Log,
+		Queue:       jobQueue,
 		RecordChan:  recordChan,
 		ClusterName: clusterName,
-		EventBus:    eventbus,
+	})
+	if err != nil {
+		cfg.Log.Error("cannot create manager", slog.Any("err", err))
+		os.Exit(1)
+	}
+	go storageManager.Run(rootCtx.Done())
+
+	// Ingester
+	ing, err := router.NewIngester(router.IngesterOpts{
+		Log:      cfg.Log,
+		EventBus: eventbus,
 	})
 	if err != nil {
 		cfg.Log.Error("cannot create ingester", slog.Any("err", err))
 		os.Exit(1)
 	}
 
+	q := router.NewSharedQueue(5 * time.Minute)
+	wgpool := router.NewWorkerPool(q, 10, cfg.Log)
+
+	go wgpool.Start(rootCtx.Done())
+
 	// Informer Manager
 	infManager, err := manager.NewManager(manager.ManagerOpts{
 		DynamicClient:  client,
 		Namespaces:     cfg.Namespaces,
-		ResyncInterval: 30 * time.Second, // TODO make configurable
-		ThrottlePeriod: 5 * time.Minute,  // TODO make configurable
+		ResyncInterval: 8 * time.Hour,   // TODO make configurable
+		ThrottlePeriod: 5 * time.Minute, // TODO make configurable
 		Eventbus:       eventbus,
 		Log:            cfg.Log,
 		Handler:        ing,
+		Queue:          q,
+		WgPool:         wgpool,
 	})
 	if err != nil {
 		cfg.Log.Error("cannot create manager", slog.Any("err", err))
@@ -124,8 +144,10 @@ func main() {
 		DynamicClient:  client,
 		Log:            cfg.Log,
 		Handler:        ing,
-		ResyncInterval: 30 * time.Second, // TODO make configurable
-		ThrottlePeriod: 5 * time.Minute,  // TODO make configurable
+		Target:         router.MANAGER,
+		ResyncInterval: 8 * time.Hour, // TODO make configurable
+		WgPool:         nil,
+		Queue:          q,
 		Namespaces:     []string{},
 		Gvr: schema.GroupVersionResource{
 			Group:    crdGroup,
@@ -137,7 +159,7 @@ func main() {
 
 	// Monitor buffer
 	go func() {
-		ticker := time.NewTicker(50 * time.Second)
+		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
 		for {
@@ -148,7 +170,9 @@ func main() {
 				cfg.Log.Info("Pipeline status",
 					slog.Int("recordChan", len(recordChan)),
 					slog.Int("queueJobs", jobQueue.GetJobCount()),
-					slog.Int("activeInformers", infManager.GetInformers()),
+					slog.Int("activeInformerKinds", infManager.GetInformers()),
+					slog.Int("activeGoRoutines", runtime.NumGoroutine()),
+					slog.Int("informerEventsToProcess", wgpool.Pending()),
 				)
 			}
 		}
@@ -158,6 +182,8 @@ func main() {
 
 	<-rootCtx.Done()
 	cfg.Log.Info("Shutting down Event ingester")
+	q.ShutDown()
+	wgpool.Wait()
 
 	/*shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

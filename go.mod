@@ -3,6 +3,7 @@ module github.com/krateoplatformops/resources-ingester
 go 1.25.5
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/krateoplatformops/plumbing v1.3.1
 	github.com/stretchr/testify v1.11.1
@@ -28,7 +29,6 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.2.2 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect

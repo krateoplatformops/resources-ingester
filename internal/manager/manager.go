@@ -3,13 +3,16 @@ package manager
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/krateoplatformops/plumbing/eventbus"
 	"github.com/krateoplatformops/resources-ingester/internal/router"
 	"github.com/krateoplatformops/resources-ingester/internal/util"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/util/workqueue"
 )
 
 const CRD_KIND = "CustomResourceDefinition"
@@ -24,6 +27,8 @@ type ManagerOpts struct {
 
 	// Multiple namespaces or nil -> watch everything
 	Namespaces []string
+	Queue      workqueue.TypedRateLimitingInterface[string]
+	WgPool     *router.WorkerPool
 }
 
 func NewManager(opts ManagerOpts) (manager, error) {
@@ -36,6 +41,9 @@ func NewManager(opts ManagerOpts) (manager, error) {
 		dynamicClient:  opts.DynamicClient,
 		Namespaces:     opts.Namespaces,
 		informers:      make(map[string]context.CancelFunc),
+		queue:          opts.Queue,
+		mu:             &sync.RWMutex{},
+		wgpool:         opts.WgPool,
 	}, nil
 }
 
@@ -46,6 +54,9 @@ type manager struct {
 	handler        router.EventHandler
 	resyncInterval time.Duration
 	throttlePeriod time.Duration
+	mu             *sync.RWMutex
+	queue          workqueue.TypedRateLimitingInterface[string]
+	wgpool         *router.WorkerPool
 
 	// Multiple namespaces or nil -> watch everything
 	Namespaces []string
@@ -54,8 +65,19 @@ type manager struct {
 
 func (m *manager) Run(stop <-chan struct{}) {
 	defer utilruntime.HandleCrash()
+	mgrCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		<-stop
+		cancel()
+	}()
+
 	sub := m.eventbus.Subscribe(router.InformerEvent{}.EventID(), func(ctx context.Context, event eventbus.Event) error {
 		eI := event.(router.InformerEvent)
+		if eI.EventTarget != router.MANAGER {
+			return nil
+		}
 		//m.log.Debug("Manager received event on eventbus", "obj", eI.Name, "kind", eI.Obj.GetKind())
 		if eI.Obj.GetKind() == "CustomResourceDefinition" {
 			gvrs, namespaced := util.ExtractGvrNsFromCrd(eI.Obj)
@@ -79,33 +101,22 @@ func (m *manager) Run(stop <-chan struct{}) {
 				switch eI.EventType {
 				case router.CREATE:
 					m.log.Debug("Starting router", "gvr", gvr.String())
-					ctx, cancel := context.WithCancel(context.Background())
-					if !m.doesGvrExist(gvr.String()) && !gvr.Empty() {
-						crdsRouter := router.NewRouter(router.RouterOpts{
-							DynamicClient:  m.dynamicClient,
-							Log:            m.log,
-							Handler:        m.handler,
-							ResyncInterval: m.throttlePeriod,
-							ThrottlePeriod: m.throttlePeriod,
-							Namespaces:     namespaces,
-							Gvr:            gvr,
-						})
-						m.informers[gvr.String()] = cancel
-						go crdsRouter.Run(ctx.Done())
-					}
+					m.startInformer(mgrCtx, gvr, namespaces)
 				case router.DELETE:
 					m.log.Debug("Stopping router", "gvr", gvr.String())
-					if cancel, ok := m.informers[gvr.String()]; ok {
-						cancel()
-						delete(m.informers, gvr.String())
-					}
+					stopInformer(m.informers, gvr.String(), m.mu)
 					m.log.Info("Stopped router", "gvr", gvr.String())
-				case router.UPDATE:
-					// Delete and recreate?
-					// Prob. not necessary 1since its a dynamic informer with unstructured
+				case router.UPDATE: // case DELETE then CREATE, if not DELETION TIMESTAMP
+					if eI.Obj.GetDeletionTimestamp() != nil {
+						m.log.Debug("Deletion timestamp on CRD, stopping router", "gvr", gvr.String())
+						stopInformer(m.informers, gvr.String(), m.mu)
+						m.log.Debug("Stopped router", "gvr", gvr.String())
+					} else {
+						m.log.Debug("Starting router", "gvr", gvr.String())
+						m.startInformer(mgrCtx, gvr, namespaces)
+					}
 				}
 			}
-
 		} else {
 
 		}
@@ -116,21 +127,40 @@ func (m *manager) Run(stop <-chan struct{}) {
 
 	m.log.Info("Manager started")
 	<-stop
-	// Cancel all informers on stop
-	for gvr := range m.informers {
-		if cancel, ok := m.informers[gvr]; ok {
-			cancel()
-			delete(m.informers, gvr)
-		}
-	}
 	m.log.Info("Manager stopped")
 }
 
 func (m *manager) GetInformers() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return len(m.informers)
 }
 
-func (m *manager) doesGvrExist(gvr string) bool {
-	_, ok := m.informers[gvr]
-	return ok
+func (m *manager) startInformer(parent context.Context, gvr schema.GroupVersionResource, namespaces []string) {
+	if gvr.Empty() {
+		return
+	}
+
+	m.mu.Lock()
+	if _, ok := m.informers[gvr.String()]; ok {
+		m.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(parent)
+	m.informers[gvr.String()] = cancel
+	m.mu.Unlock()
+
+	m.log.Debug("Starting router", "gvr", gvr.String())
+	crdsRouter := router.NewRouter(router.RouterOpts{
+		DynamicClient:  m.dynamicClient,
+		Log:            m.log,
+		Handler:        m.handler,
+		ResyncInterval: m.resyncInterval,
+		Queue:          m.queue,
+		WgPool:         m.wgpool,
+		Target:         router.STORAGE,
+		Namespaces:     namespaces,
+		Gvr:            gvr,
+	})
+	go crdsRouter.Run(ctx.Done())
 }

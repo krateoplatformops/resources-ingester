@@ -3,40 +3,51 @@ package router
 import (
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
 )
-
-type Operation string
 
 const (
-	CREATE Operation = "create"
-	UPDATE Operation = "update"
-	DELETE Operation = "delete"
+	listPageSize   = 1000
+	defaultWorkers = 1
 )
 
-// EventHandler handles final processed events
-type EventHandler interface {
-	Handle(o *unstructured.Unstructured, op Operation)
+func NewSharedQueue(throttlePeriod time.Duration) workqueue.TypedRateLimitingInterface[string] {
+	var rl workqueue.TypedRateLimiter[string]
+	if throttlePeriod > 0 {
+		rl = workqueue.NewTypedItemExponentialFailureRateLimiter[string](throttlePeriod, 5*time.Minute)
+	} else {
+		rl = workqueue.DefaultTypedControllerRateLimiter[string]()
+	}
+	return workqueue.NewTypedRateLimitingQueue(rl)
 }
 
-// Router routes Kubernetes Objects to a handler with throttling,
-// deduplication and multi-namespace support.
-type Router struct {
-	handler        EventHandler
-	informers      []cache.SharedInformer
-	throttlePeriod time.Duration
-	log            *slog.Logger
+type EventHandler interface {
+	Handle(o *unstructured.Unstructured, op Operation, tg Target)
+}
 
+type Router struct {
+	handler    EventHandler
+	informers  []cache.SharedInformer
+	log        *slog.Logger
 	namespaces []string
 	Gvr        schema.GroupVersionResource
+	workers    int
+	queue      workqueue.TypedRateLimitingInterface[string]
+	mu         sync.Mutex
+	pending    map[string]*pendingEvent
+	wgpool     *WorkerPool
+	target     Target
 }
 
 type RouterOpts struct {
@@ -44,12 +55,13 @@ type RouterOpts struct {
 	Log            *slog.Logger
 	Handler        EventHandler
 	ResyncInterval time.Duration
-	ThrottlePeriod time.Duration
-
-	// Multiple namespaces or nil -> watch everything
-	Namespaces []string
-	Gvr        schema.GroupVersionResource
-	Resource   string
+	Queue          workqueue.TypedRateLimitingInterface[string]
+	Workers        int
+	Namespaces     []string
+	Gvr            schema.GroupVersionResource
+	Resource       string
+	WgPool         *WorkerPool
+	Target         Target
 }
 
 func NewRouter(opts RouterOpts) *Router {
@@ -58,92 +70,136 @@ func NewRouter(opts RouterOpts) *Router {
 		namespaces = []string{corev1.NamespaceAll}
 	}
 
+	workers := opts.Workers
+	if workers <= 0 {
+		workers = defaultWorkers
+	}
+
+	opts.Log.Debug("NewRouter: creating informers",
+		"gvr", opts.Gvr.String(),
+		"namespaces", namespaces,
+		"listPageSize", listPageSize,
+		"workers", workers,
+	)
+
+	tweakListOptions := func(o *metav1.ListOptions) {
+		o.Limit = listPageSize
+	}
+
 	var informers []cache.SharedInformer
 	for _, ns := range namespaces {
-		f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(opts.DynamicClient, 0, ns, nil)
-		i := f.ForResource(opts.Gvr)
-		informers = append(informers, i.Informer())
+		opts.Log.Debug("NewRouter: creating informer for namespace",
+			"gvr", opts.Gvr.String(), "namespace", ns)
+
+		f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(
+			opts.DynamicClient, opts.ResyncInterval, ns, tweakListOptions,
+		)
+		informers = append(informers, f.ForResource(opts.Gvr).Informer())
+	}
+
+	opts.Log.Debug("NewRouter: informers created",
+		"gvr", opts.Gvr.String(), "count", len(informers))
+
+	if opts.Queue == nil {
+		panic("router: RouterOpts.Queue must not be nil")
 	}
 
 	return &Router{
-		informers:      informers,
-		handler:        opts.Handler,
-		throttlePeriod: opts.ThrottlePeriod,
-		log:            opts.Log,
-		namespaces:     opts.Namespaces,
-		Gvr:            opts.Gvr,
+		informers:  informers,
+		handler:    opts.Handler,
+		log:        opts.Log,
+		namespaces: opts.Namespaces,
+		Gvr:        opts.Gvr,
+		workers:    workers,
+		queue:      opts.Queue,
+		wgpool:     opts.WgPool,
+		pending:    make(map[string]*pendingEvent),
+		target:     opts.Target,
 	}
 }
 
-func (or *Router) Run(stop <-chan struct{}) {
+func (r *Router) Run(stop <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 
-	for _, inf := range or.informers {
+	r.log.Info("Router.Run: starting",
+		"gvr", r.Gvr.String(),
+		"informers", len(r.informers),
+		"workers", r.workers,
+	)
+
+	for i, inf := range r.informers {
 		inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
-			AddFunc:    or.OnAdd,
-			UpdateFunc: or.OnUpdate,
-			DeleteFunc: or.OnDelete,
+			AddFunc:    r.onAdd,
+			UpdateFunc: r.onUpdate,
+			DeleteFunc: r.onDelete,
 		})
-
 		go inf.Run(stop)
+		r.log.Debug("Router.Run: informer goroutine launched",
+			"gvr", r.Gvr.String(), "informer_index", i)
 	}
 
-	// Wait for all informers to sync
-	for _, inf := range or.informers {
-		if !cache.WaitForCacheSync(stop, inf.HasSynced) {
-			err := fmt.Errorf("timed out waiting for caches to sync")
-			utilruntime.HandleError(err)
-			or.log.Error("cache sync failed", slog.Any("err", err))
-			return
-		}
+	syncFuncs := make([]cache.InformerSynced, len(r.informers))
+	for i, inf := range r.informers {
+		syncFuncs[i] = inf.HasSynced
 	}
 
-	or.log.Info("Router started", "gvr", or.Gvr.String())
-	<-stop
-	or.log.Info("Router stopped", "gvr", or.Gvr.String())
-}
+	r.log.Info("Router.Run: waiting for caches to sync", "gvr", r.Gvr.String())
 
-func (or *Router) OnAdd(obj any) {
-	objUn, ok := obj.(*unstructured.Unstructured)
-	if !ok {
-		or.log.Error("OnCreate: unexpected object type", "type", fmt.Sprintf("%T", obj))
+	if !cache.WaitForCacheSync(stop, syncFuncs...) {
+		r.log.Info("Router.Run: stop signal received before cache sync completed",
+			"gvr", r.Gvr.String())
 		return
 	}
-	or.onEvent(objUn, CREATE)
+
+	r.log.Info("Router.Run: caches synced",
+		"gvr", r.Gvr.String(), "workers", r.workers)
+
+	r.log.Info("Router started", "gvr", r.Gvr.String())
+	<-stop
+	r.log.Info("Router stopped", "gvr", r.Gvr.String())
 }
 
-// Dedup by ResourceVersion to prevent noisy updates
-func (or *Router) OnUpdate(oldObj, newObj any) {
+func (r *Router) enqueue(obj *unstructured.Unstructured, op Operation) {
+	if r.wgpool != nil {
+		r.wgpool.Enqueue(r.handler, obj, op, r.target, r.Gvr)
+	} else {
+		r.handler.Handle(obj, op, r.target)
+	}
+}
+
+func (r *Router) onAdd(obj any) {
+	objUn, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		r.log.Error("onAdd: unexpected object type", "type", fmt.Sprintf("%T", obj))
+		return
+	}
+
+	r.enqueue(objUn, CREATE)
+}
+
+func (r *Router) onUpdate(oldObj, newObj any) {
 	oldObjUn, ok1 := oldObj.(*unstructured.Unstructured)
 	newObjUn, ok2 := newObj.(*unstructured.Unstructured)
 	if !ok1 || !ok2 {
-		or.log.Error("OnUpdate: unexpected object type", "type old", fmt.Sprintf("%T", oldObj), "type new", fmt.Sprintf("%T", newObj))
 		return
 	}
 
 	if oldObjUn.GetResourceVersion() == newObjUn.GetResourceVersion() {
-		// No real change — skip
 		return
 	}
 
-	or.onEvent(newObjUn, UPDATE)
+	r.enqueue(newObjUn, UPDATE)
 }
 
-func (or *Router) OnDelete(obj any) {
+func (r *Router) onDelete(obj any) {
 	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
 		obj = tombstone.Obj
 	}
-
 	objUn, ok := obj.(*unstructured.Unstructured)
 	if !ok {
-		or.log.Error("OnDelete: unexpected object type", "type", fmt.Sprintf("%T", obj))
+		r.log.Error("onDelete: unexpected object type", "type", fmt.Sprintf("%T", obj))
 		return
 	}
 
-	or.onEvent(objUn, DELETE)
-}
-
-func (or *Router) onEvent(objUn *unstructured.Unstructured, op Operation) {
-	//or.log.Info("onEvent called", "obj", objUn.GetName(), "op", op)
-	or.handler.Handle(objUn, op)
+	r.enqueue(objUn, DELETE)
 }

@@ -113,11 +113,9 @@ func (w *Worker) flush() {
 		}
 		b.WriteString(")")
 
-		vals = append(vals,
-			r.CreatedAt, r.ClusterName, r.UID, r.GlobalUID,
+		vals = append(vals, r.ClusterName, r.UID, r.GlobalUID,
 			r.Namespace, r.ResourceKind, r.ResourceName,
-			r.EventType, r.Reason, r.Message, r.CompositionID,
-			r.Raw, r.ResourceVersion,
+			r.CompositionID, r.Raw, r.ResourceVersion,
 		)
 	}
 
