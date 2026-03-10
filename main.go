@@ -3,20 +3,24 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/krateoplatformops/plumbing/kubeutil"
+	"github.com/krateoplatformops/plumbing/pgutil"
+	"github.com/krateoplatformops/plumbing/server/probes"
 	"github.com/krateoplatformops/resources-ingester/internal/batch"
 	"github.com/krateoplatformops/resources-ingester/internal/config"
 	"github.com/krateoplatformops/resources-ingester/internal/manager"
 	"github.com/krateoplatformops/resources-ingester/internal/queue"
 	"github.com/krateoplatformops/resources-ingester/internal/router"
 	"github.com/krateoplatformops/resources-ingester/internal/storage"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -39,7 +43,7 @@ func main() {
 
 	storage.StartCacheCleaner(rootCtx, 2*time.Minute)
 
-	/*pgCtx, cancel := context.WithTimeout(rootCtx, cfg.DbReadyTimeout)
+	pgCtx, cancel := context.WithTimeout(rootCtx, cfg.DbReadyTimeout)
 	defer cancel()
 
 	pool, err := pgutil.WaitForPostgres(pgCtx, cfg.Log, cfg.DbURL)
@@ -52,9 +56,9 @@ func main() {
 
 	// Health probes server
 	hs := probes.New(cfg.Log, pool, cfg.Port)
-	hs.Start()*/
+	hs.Start()
 
-	pool := &pgxpool.Pool{} // Mock database, not used yet
+	// pool := &pgxpool.Pool{} // Mock database, not used yet
 
 	restConfig, err := rest.InClusterConfig()
 	if err != nil {
@@ -77,8 +81,8 @@ func main() {
 		Pool:       pool,
 		Log:        cfg.Log,
 		Input:      recordChan,
-		MaxBatch:   5,
-		FlushEvery: 1 * time.Second,
+		MaxBatch:   50,
+		FlushEvery: 5 * time.Second,
 	})
 	go batchWorker.Run(rootCtx.Done())
 
@@ -117,8 +121,14 @@ func main() {
 	}
 
 	q := router.NewSharedQueue(5 * time.Minute)
-	wgpool := router.NewWorkerPool(q, 10, cfg.Log)
-
+	metrics := router.NewWorkerPoolMetrics(prometheus.DefaultRegisterer)
+	wgpool := router.NewWorkerPool(
+		q,
+		10,
+		ing,
+		cfg.Log,
+		metrics,
+	)
 	go wgpool.Start(rootCtx.Done())
 
 	// Informer Manager
@@ -144,7 +154,6 @@ func main() {
 		DynamicClient:  client,
 		Log:            cfg.Log,
 		Handler:        ing,
-		Target:         router.MANAGER,
 		ResyncInterval: 8 * time.Hour, // TODO make configurable
 		WgPool:         nil,
 		Queue:          q,
@@ -155,6 +164,13 @@ func main() {
 			Resource: crdResource,
 		},
 	})
+	for ns, inf := range crdsRouter.InformersByNamespace() {
+		wgpool.RegisterInformer(schema.GroupVersionResource{
+			Group:    crdGroup,
+			Version:  crdVersion,
+			Resource: crdResource,
+		}, ns, inf)
+	}
 	go crdsRouter.Run(rootCtx.Done())
 
 	// Monitor buffer
@@ -172,11 +188,13 @@ func main() {
 					slog.Int("queueJobs", jobQueue.GetJobCount()),
 					slog.Int("activeInformerKinds", infManager.GetInformers()),
 					slog.Int("activeGoRoutines", runtime.NumGoroutine()),
-					slog.Int("informerEventsToProcess", wgpool.Pending()),
 				)
 			}
 		}
 	}()
+
+	http.Handle("/metrics", promhttp.Handler())
+	go http.ListenAndServe(":9090", nil)
 
 	cfg.Log.Info("Event ingester started")
 
@@ -185,11 +203,11 @@ func main() {
 	q.ShutDown()
 	wgpool.Wait()
 
-	/*shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-		if err := hs.Shutdown(shutdownCtx); err != nil {
-			cfg.Log.Error("Health server shutdown failed", slog.Any("err", err))
-		}
-	*/
+	if err := hs.Shutdown(shutdownCtx); err != nil {
+		cfg.Log.Error("Health server shutdown failed", slog.Any("err", err))
+	}
+
 }

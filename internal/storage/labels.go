@@ -27,17 +27,17 @@ type cacheEntry struct {
 
 var compositionCache sync.Map
 
-func hasCompositionId(obj *corev1.Event) bool {
-	labels := obj.GetLabels()
+func hasCompositionId(objUn *unstructured.Unstructured) (string, bool) {
+	labels := objUn.GetLabels()
 	if len(labels) == 0 {
-		return false
+		return "", false
 	}
 
 	val, ok := labels[keyCompositionID]
 	if len(val) == 0 {
-		return false
+		return "", false
 	}
-	return ok
+	return val, ok
 }
 
 func findCompositionID(resolver *objects.ObjectResolver, ref *corev1.ObjectReference, log *slog.Logger) (cid string, err error) {

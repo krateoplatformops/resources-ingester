@@ -14,3 +14,20 @@ spec:
       name: http
   selector:
     {{- include "resources-ingester.selectorLabels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "resources-ingester.fullname" . }}-prom
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "resources-ingester.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.metrics.type }}
+  ports:
+    - port: {{ .Values.metrics.port }}
+      targetPort: 9090
+      protocol: TCP
+      name: prom
+  selector:
+    {{- include "resources-ingester.selectorLabels" . | nindent 4 }}

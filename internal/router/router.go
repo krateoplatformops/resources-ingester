@@ -6,31 +6,20 @@ import (
 	"sync"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 )
 
 const (
-	listPageSize   = 1000
-	defaultWorkers = 1
+	listPageSize = 1000
 )
-
-func NewSharedQueue(throttlePeriod time.Duration) workqueue.TypedRateLimitingInterface[string] {
-	var rl workqueue.TypedRateLimiter[string]
-	if throttlePeriod > 0 {
-		rl = workqueue.NewTypedItemExponentialFailureRateLimiter[string](throttlePeriod, 5*time.Minute)
-	} else {
-		rl = workqueue.DefaultTypedControllerRateLimiter[string]()
-	}
-	return workqueue.NewTypedRateLimitingQueue(rl)
-}
 
 type EventHandler interface {
 	Handle(o *unstructured.Unstructured, op Operation, tg Target)
@@ -45,9 +34,7 @@ type Router struct {
 	workers    int
 	queue      workqueue.TypedRateLimitingInterface[string]
 	mu         sync.Mutex
-	pending    map[string]*pendingEvent
 	wgpool     *WorkerPool
-	target     Target
 }
 
 type RouterOpts struct {
@@ -61,60 +48,41 @@ type RouterOpts struct {
 	Gvr            schema.GroupVersionResource
 	Resource       string
 	WgPool         *WorkerPool
-	Target         Target
 }
 
 func NewRouter(opts RouterOpts) *Router {
 	namespaces := opts.Namespaces
 	if len(namespaces) == 0 {
-		namespaces = []string{corev1.NamespaceAll}
-	}
-
-	workers := opts.Workers
-	if workers <= 0 {
-		workers = defaultWorkers
-	}
-
-	opts.Log.Debug("NewRouter: creating informers",
-		"gvr", opts.Gvr.String(),
-		"namespaces", namespaces,
-		"listPageSize", listPageSize,
-		"workers", workers,
-	)
-
-	tweakListOptions := func(o *metav1.ListOptions) {
-		o.Limit = listPageSize
+		namespaces = []string{metav1.NamespaceAll}
 	}
 
 	var informers []cache.SharedInformer
-	for _, ns := range namespaces {
-		opts.Log.Debug("NewRouter: creating informer for namespace",
-			"gvr", opts.Gvr.String(), "namespace", ns)
-
-		f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(
-			opts.DynamicClient, opts.ResyncInterval, ns, tweakListOptions,
-		)
-		informers = append(informers, f.ForResource(opts.Gvr).Informer())
+	tweakListOptions := func(o *metav1.ListOptions) {
+		o.Limit = listPageSize
 	}
+	for _, ns := range namespaces {
+		f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(
+			opts.DynamicClient,
+			opts.ResyncInterval,
+			ns,
+			tweakListOptions,
+		)
 
-	opts.Log.Debug("NewRouter: informers created",
-		"gvr", opts.Gvr.String(), "count", len(informers))
+		inf := f.ForResource(opts.Gvr).Informer()
+		informers = append(informers, inf)
 
-	if opts.Queue == nil {
-		panic("router: RouterOpts.Queue must not be nil")
+		if opts.WgPool != nil {
+			opts.WgPool.RegisterInformer(opts.Gvr, ns, inf)
+		}
 	}
 
 	return &Router{
 		informers:  informers,
 		handler:    opts.Handler,
 		log:        opts.Log,
-		namespaces: opts.Namespaces,
 		Gvr:        opts.Gvr,
-		workers:    workers,
 		queue:      opts.Queue,
-		wgpool:     opts.WgPool,
-		pending:    make(map[string]*pendingEvent),
-		target:     opts.Target,
+		namespaces: namespaces,
 	}
 }
 
@@ -150,21 +118,20 @@ func (r *Router) Run(stop <-chan struct{}) {
 			"gvr", r.Gvr.String())
 		return
 	}
-
-	r.log.Info("Router.Run: caches synced",
-		"gvr", r.Gvr.String(), "workers", r.workers)
-
-	r.log.Info("Router started", "gvr", r.Gvr.String())
+	r.log.Info("router started", "gvr", r.Gvr.String())
 	<-stop
 	r.log.Info("Router stopped", "gvr", r.Gvr.String())
 }
 
-func (r *Router) enqueue(obj *unstructured.Unstructured, op Operation) {
-	if r.wgpool != nil {
-		r.wgpool.Enqueue(r.handler, obj, op, r.target, r.Gvr)
-	} else {
-		r.handler.Handle(obj, op, r.target)
+func (r *Router) enqueue(obj any) {
+	key, err := cache.MetaNamespaceKeyFunc(obj)
+	if err != nil {
+		r.log.Error("failed building key", "err", err)
+		return
 	}
+	r.log.Debug("Adding to queue", "key", key)
+	fullKey := buildKey(r.Gvr, key)
+	r.queue.Add(fullKey)
 }
 
 func (r *Router) onAdd(obj any) {
@@ -174,7 +141,7 @@ func (r *Router) onAdd(obj any) {
 		return
 	}
 
-	r.enqueue(objUn, CREATE)
+	r.enqueue(objUn)
 }
 
 func (r *Router) onUpdate(oldObj, newObj any) {
@@ -188,7 +155,7 @@ func (r *Router) onUpdate(oldObj, newObj any) {
 		return
 	}
 
-	r.enqueue(newObjUn, UPDATE)
+	r.enqueue(newObjUn)
 }
 
 func (r *Router) onDelete(obj any) {
@@ -201,5 +168,13 @@ func (r *Router) onDelete(obj any) {
 		return
 	}
 
-	r.enqueue(objUn, DELETE)
+	r.enqueue(objUn)
+}
+
+func (r *Router) InformersByNamespace() map[string]cache.SharedInformer {
+	result := make(map[string]cache.SharedInformer, len(r.namespaces))
+	for i, ns := range r.namespaces {
+		result[ns] = r.informers[i]
+	}
+	return result
 }

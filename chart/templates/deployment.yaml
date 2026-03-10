@@ -80,6 +80,9 @@ spec:
             - name: http
               containerPort: {{ $config.PORT | default "8082" | int }}
               protocol: TCP
+            - name: prom
+              containerPort: {{ .Values.metrics.port | default "9090" | int }}
+              protocol: TCP
           {{- with .Values.livenessProbe }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}

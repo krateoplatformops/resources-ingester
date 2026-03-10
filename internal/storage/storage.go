@@ -75,14 +75,18 @@ func (ing *storage) Run(stop <-chan struct{}) {
 			UID:             eI.Obj.GetUID(),
 			ResourceVersion: eI.Obj.GetResourceVersion(),
 		}
-		compositionId, err := findCompositionID(ing.objectResolver, ref, ing.log)
-		if err != nil {
-			if !errors.Is(err, ErrCompositionIdNotFound) {
-				ing.log.Error("unable to look for composition id",
-					slog.String("eI.Obj", ref.Name),
-					slog.Any("err", err),
-				)
-				return err
+		compositionId, ok := hasCompositionId(&eI.Obj)
+		if !ok {
+			var err error
+			compositionId, err = findCompositionID(ing.objectResolver, ref, ing.log)
+			if err != nil {
+				if !errors.Is(err, ErrCompositionIdNotFound) {
+					ing.log.Error("unable to look for composition id",
+						slog.String("eI.Obj", ref.Name),
+						slog.Any("err", err),
+					)
+					return err
+				}
 			}
 		}
 
@@ -98,12 +102,12 @@ func (ing *storage) Run(stop <-chan struct{}) {
 			return fmt.Errorf("cannot store: UID is empty")
 		}
 
-		// job := &batch.InsertRecordJob{
-		// 	Record: rec,
-		// 	Input:  ing.recordChan,
-		// }
+		job := &batch.InsertRecordJob{
+			Record: rec,
+			Input:  ing.recordChan,
+		}
 
-		// // ing.queue.Push(job)
+		ing.queue.Push(job)
 
 		return nil
 	})

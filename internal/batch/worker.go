@@ -95,7 +95,7 @@ func (w *Worker) flush() {
 	ctx := context.Background()
 	var b strings.Builder
 
-	b.WriteString("INSERT INTO k8s_events (")
+	b.WriteString("INSERT INTO k8s_resources (")
 	b.WriteString(strings.Join(w.columns, ", "))
 	b.WriteString(") VALUES ")
 

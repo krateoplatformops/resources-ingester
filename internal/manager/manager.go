@@ -78,7 +78,7 @@ func (m *manager) Run(stop <-chan struct{}) {
 		if eI.EventTarget != router.MANAGER {
 			return nil
 		}
-		//m.log.Debug("Manager received event on eventbus", "obj", eI.Name, "kind", eI.Obj.GetKind())
+		m.log.Debug("Manager received event on eventbus", "obj", eI.Name, "kind", eI.Obj.GetKind())
 		if eI.Obj.GetKind() == "CustomResourceDefinition" {
 			gvrs, namespaced := util.ExtractGvrNsFromCrd(eI.Obj)
 			// Gvrs will differ only in version, we can check the first one's group for compositions
@@ -158,7 +158,6 @@ func (m *manager) startInformer(parent context.Context, gvr schema.GroupVersionR
 		ResyncInterval: m.resyncInterval,
 		Queue:          m.queue,
 		WgPool:         m.wgpool,
-		Target:         router.STORAGE,
 		Namespaces:     namespaces,
 		Gvr:            gvr,
 	})
