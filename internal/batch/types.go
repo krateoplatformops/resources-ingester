@@ -1,17 +1,16 @@
 package batch
 
-import (
-	"github.com/jackc/pgx/v5/pgtype"
-)
+import v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 type InsertRecord struct {
-	ClusterName     string
-	UID             string
-	GlobalUID       string
-	Namespace       string
-	ResourceKind    string
-	ResourceName    string
-	CompositionID   pgtype.UUID
-	Raw             []byte
-	ResourceVersion string
+	ClusterName       string
+	UID               string
+	GlobalUID         string
+	Namespace         string
+	ResourceKind      string
+	ResourceName      string
+	CompositionID     string
+	Raw               []byte
+	ResourceVersion   string
+	DeletionTimestamp *v1.Time
 }

@@ -21,7 +21,7 @@ func GetGVR(gvk schema.GroupVersionKind) (schema.GroupVersionResource, error) {
 // This function returns the GVR for the CRs to watch for a given CRD and also tells whether its cluster or namespaced-scoped
 // Includes all versions
 // Static
-func ExtractGvrNsFromCrd(crd unstructured.Unstructured) ([]schema.GroupVersionResource, bool) {
+func ExtractGvrNsFromCrd(crd *unstructured.Unstructured) ([]schema.GroupVersionResource, bool) {
 	res := []schema.GroupVersionResource{}
 
 	spec, ok := crd.Object["spec"].(map[string]interface{})

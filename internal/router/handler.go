@@ -6,6 +6,7 @@ import (
 
 	"github.com/krateoplatformops/plumbing/eventbus"
 	"github.com/krateoplatformops/resources-ingester/internal/batch"
+
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -31,11 +32,12 @@ type ingester struct {
 }
 
 func (ing *ingester) Handle(obj *unstructured.Unstructured, op Operation, tg Target) {
-	ing.eventbus.PublishAsync(context.Background(), InformerEvent{
-		Name:        obj.GetName(),
-		EventType:   op,
-		EventTarget: tg,
-		Obj:         *obj,
-	})
-
+	if obj != nil {
+		ing.eventbus.PublishAsync(context.Background(), InformerEvent{
+			Name:        obj.GetName(),
+			EventType:   op,
+			EventTarget: tg,
+			Obj:         obj,
+		})
+	}
 }

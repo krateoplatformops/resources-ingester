@@ -31,7 +31,6 @@ type Router struct {
 	log        *slog.Logger
 	namespaces []string
 	Gvr        schema.GroupVersionResource
-	workers    int
 	queue      workqueue.TypedRateLimitingInterface[string]
 	mu         sync.Mutex
 	wgpool     *WorkerPool
@@ -43,10 +42,8 @@ type RouterOpts struct {
 	Handler        EventHandler
 	ResyncInterval time.Duration
 	Queue          workqueue.TypedRateLimitingInterface[string]
-	Workers        int
 	Namespaces     []string
 	Gvr            schema.GroupVersionResource
-	Resource       string
 	WgPool         *WorkerPool
 }
 
@@ -83,6 +80,7 @@ func NewRouter(opts RouterOpts) *Router {
 		Gvr:        opts.Gvr,
 		queue:      opts.Queue,
 		namespaces: namespaces,
+		wgpool:     opts.WgPool,
 	}
 }
 
@@ -92,7 +90,6 @@ func (r *Router) Run(stop <-chan struct{}) {
 	r.log.Info("Router.Run: starting",
 		"gvr", r.Gvr.String(),
 		"informers", len(r.informers),
-		"workers", r.workers,
 	)
 
 	for i, inf := range r.informers {
@@ -129,8 +126,14 @@ func (r *Router) enqueue(obj any) {
 		r.log.Error("failed building key", "err", err)
 		return
 	}
-	r.log.Debug("Adding to queue", "key", key)
 	fullKey := buildKey(r.Gvr, key)
+
+	objUn := obj.(*unstructured.Unstructured)
+	if objUn.GetDeletionTimestamp() != nil && r.wgpool != nil {
+		r.wgpool.addDeletedObject(fullKey, objUn)
+	}
+
+	r.log.Debug("Adding to queue", "fullKey", fullKey)
 	r.queue.Add(fullKey)
 }
 
@@ -166,6 +169,11 @@ func (r *Router) onDelete(obj any) {
 	if !ok {
 		r.log.Error("onDelete: unexpected object type", "type", fmt.Sprintf("%T", obj))
 		return
+	}
+
+	if objUn.GetDeletionTimestamp() == nil {
+		now := metav1.Now()
+		objUn.SetDeletionTimestamp(&now)
 	}
 
 	r.enqueue(objUn)

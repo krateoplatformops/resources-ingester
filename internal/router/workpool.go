@@ -32,6 +32,7 @@ type WorkerPool struct {
 	wg        sync.WaitGroup
 	mu        sync.RWMutex
 	metrics   *WorkerPoolMetrics
+	delObjs   sync.Map
 }
 
 func NewWorkerPool(
@@ -49,6 +50,7 @@ func NewWorkerPool(
 		log:       logger,
 		informers: map[string]cache.SharedInformer{},
 		metrics:   metrics,
+		delObjs:   sync.Map{},
 	}
 }
 
@@ -108,8 +110,12 @@ func (p *WorkerPool) processNext() bool {
 	p.metrics.processed.Inc()
 	p.metrics.duration.Observe(current.Seconds())
 
-	p.log.Debug("WorkerPool.processNext: took", "time", current.Milliseconds())
+	p.log.Debug("WorkerPool.processNext: took", slog.Int64("time ms", current.Milliseconds()))
 	return true
+}
+
+func (p *WorkerPool) addDeletedObject(fullKey string, objUn *unstructured.Unstructured) {
+	p.delObjs.Store(fullKey, objUn)
 }
 
 func (p *WorkerPool) reconcile(fullKey string) error {
@@ -147,7 +153,14 @@ func (p *WorkerPool) reconcile(fullKey string) error {
 		return err
 	}
 	if !exists {
-		p.handler.Handle(nil, DELETE, target)
+		val, ok := p.delObjs.Load(fullKey)
+		if !ok {
+			p.log.Error("deleted object not in storage", "fullkey", fullKey, "ok", ok)
+			return fmt.Errorf("deleted object not found for key %s", fullKey)
+		}
+		objUn := (val.(*unstructured.Unstructured))
+		p.delObjs.Delete(fullKey)
+		p.handler.Handle(objUn, DELETE, target)
 		return nil
 	}
 

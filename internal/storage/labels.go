@@ -1,126 +1,26 @@
 package storage
 
 import (
-	"context"
-	"errors"
-	"log/slog"
-	"sync"
-	"time"
+	"strings"
 
-	"github.com/krateoplatformops/resources-ingester/internal/objects"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/client-go/util/retry"
 )
 
 const (
 	keyCompositionID = "krateo.io/composition-id"
-	cacheTTL         = 5 * time.Minute
 )
-
-var ErrCompositionIdNotFound = errors.New("composition id NOT found")
-
-type cacheEntry struct {
-	value     string
-	expiresAt time.Time
-}
-
-var compositionCache sync.Map
 
 func hasCompositionId(objUn *unstructured.Unstructured) (string, bool) {
 	labels := objUn.GetLabels()
-	if len(labels) == 0 {
-		return "", false
+	var val string
+	var ok bool
+
+	if len(labels) > 0 {
+		val, ok = labels[keyCompositionID]
 	}
 
-	val, ok := labels[keyCompositionID]
-	if len(val) == 0 {
-		return "", false
+	if !ok && strings.Contains(objUn.GetAPIVersion(), "composition.krateo.io") {
+		return string(objUn.GetUID()), true
 	}
 	return val, ok
-}
-
-func findCompositionID(resolver *objects.ObjectResolver, ref *corev1.ObjectReference, log *slog.Logger) (cid string, err error) {
-	// 1. Hit cache
-	if entryI, ok := compositionCache.Load(ref.UID); ok {
-		entry := entryI.(cacheEntry)
-		if time.Now().Before(entry.expiresAt) {
-			return entry.value, nil
-		}
-		// expired, remove
-		compositionCache.Delete(ref.UID)
-	}
-
-	// 2. Hit k8s API server
-	var obj *unstructured.Unstructured
-	retryErr := retry.OnError(retry.DefaultRetry,
-		func(e error) bool {
-			if e != nil {
-				resolver.InvalidateRESTMapperCache()
-				return true
-			}
-			return false
-		},
-		func() error {
-			obj, err = resolver.ResolveReference(context.Background(), ref)
-			return err
-		})
-	if retryErr != nil {
-		return "", retryErr
-	}
-
-	if obj == nil {
-		log.Warn("object not found resolving reference",
-			slog.String("name", ref.Name),
-			slog.String("kind", ref.Kind),
-			slog.String("apiVersion", ref.APIVersion),
-		)
-		return "", nil
-	}
-
-	labels := obj.GetLabels()
-	if len(labels) == 0 {
-		log.Info("no labels found in resolved reference",
-			slog.String("name", ref.Name),
-			slog.String("kind", ref.Kind),
-			slog.String("apiVersion", ref.APIVersion),
-		)
-		return "", nil
-	}
-
-	var ok bool
-	cid, ok = labels[keyCompositionID]
-	if !ok || cid == "" {
-		return "", ErrCompositionIdNotFound
-	}
-
-	// 3. Update cache
-	compositionCache.Store(ref.UID, cacheEntry{
-		value:     cid,
-		expiresAt: time.Now().Add(cacheTTL),
-	})
-
-	return cid, nil
-}
-
-func StartCacheCleaner(ctx context.Context, interval time.Duration) {
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return // exit goroutine
-			case <-ticker.C:
-				now := time.Now()
-				compositionCache.Range(func(key, val interface{}) bool {
-					entry := val.(cacheEntry)
-					if now.After(entry.expiresAt) {
-						compositionCache.Delete(key)
-					}
-					return true
-				})
-			}
-		}
-	}()
 }

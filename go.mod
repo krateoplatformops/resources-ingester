@@ -3,7 +3,6 @@ module github.com/krateoplatformops/resources-ingester
 go 1.25.5
 
 require (
-	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/krateoplatformops/plumbing v1.3.1
 	github.com/stretchr/testify v1.11.1
@@ -13,6 +12,8 @@ require (
 	k8s.io/klog/v2 v2.130.1
 	sigs.k8s.io/e2e-framework v0.6.0
 )
+
+require github.com/google/uuid v1.6.0 // indirect
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect

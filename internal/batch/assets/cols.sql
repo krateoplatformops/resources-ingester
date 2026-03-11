@@ -7,4 +7,5 @@ resource_kind,
 resource_name,
 composition_id,
 raw,
-resource_version
+resource_version,
+deletion_timestamp

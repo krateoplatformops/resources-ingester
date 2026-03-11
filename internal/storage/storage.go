@@ -3,12 +3,9 @@ package storage
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/krateoplatformops/plumbing/eventbus"
 	"github.com/krateoplatformops/resources-ingester/internal/batch"
@@ -16,7 +13,6 @@ import (
 	"github.com/krateoplatformops/resources-ingester/internal/queue"
 	"github.com/krateoplatformops/resources-ingester/internal/router"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/rest"
@@ -67,47 +63,66 @@ func (ing *storage) Run(stop <-chan struct{}) {
 			return nil
 		}
 
-		ref := &corev1.ObjectReference{
-			Kind:            eI.Obj.GetKind(),
-			APIVersion:      eI.Obj.GetAPIVersion(),
-			Name:            eI.Obj.GetName(),
-			Namespace:       eI.Obj.GetNamespace(),
-			UID:             eI.Obj.GetUID(),
-			ResourceVersion: eI.Obj.GetResourceVersion(),
-		}
-		compositionId, ok := hasCompositionId(&eI.Obj)
-		if !ok {
-			var err error
-			compositionId, err = findCompositionID(ing.objectResolver, ref, ing.log)
-			if err != nil {
-				if !errors.Is(err, ErrCompositionIdNotFound) {
-					ing.log.Error("unable to look for composition id",
-						slog.String("eI.Obj", ref.Name),
-						slog.Any("err", err),
-					)
-					return err
-				}
+		switch eI.EventType {
+		case router.CREATE, router.UPDATE:
+			compositionId, ok := hasCompositionId(eI.Obj)
+			if !ok {
+				ing.log.Warn("CompositionId not found",
+					slog.String("name", eI.Obj.GetName()),
+					slog.String("apiversion", eI.Obj.GetAPIVersion()),
+					slog.String("kind", eI.Obj.GetKind()),
+					slog.String("compositionId", compositionId),
+				)
 			}
+
+			ing.log.Debug("Storage handling informer event for eI.Object",
+				slog.String("name", eI.Obj.GetName()),
+				slog.String("apiversion", eI.Obj.GetAPIVersion()),
+				slog.String("kind", eI.Obj.GetKind()),
+				slog.String("compositionId", compositionId),
+			)
+
+			rec := ing.buildRecord(eI.Obj, compositionId)
+			if rec.UID == "" {
+				return fmt.Errorf("cannot store: UID is empty")
+			}
+
+			job := &batch.InsertRecordJob{
+				Record: rec,
+				Input:  ing.recordChan,
+			}
+
+			ing.queue.Push(job)
+		case router.DELETE:
+			compositionId, ok := hasCompositionId(eI.Obj)
+			if !ok {
+				ing.log.Warn("CompositionId not found",
+					slog.String("name", eI.Obj.GetName()),
+					slog.String("apiversion", eI.Obj.GetAPIVersion()),
+					slog.String("kind", eI.Obj.GetKind()),
+					slog.String("compositionId", compositionId),
+				)
+			}
+
+			ing.log.Debug("Storage handling informer event for eI.Object",
+				slog.String("name", eI.Obj.GetName()),
+				slog.String("apiversion", eI.Obj.GetAPIVersion()),
+				slog.String("kind", eI.Obj.GetKind()),
+				slog.String("compositionId", compositionId),
+			)
+
+			rec := ing.buildRecord(eI.Obj, compositionId)
+			if rec.UID == "" {
+				return fmt.Errorf("cannot store: UID is empty")
+			}
+
+			job := &batch.InsertRecordJob{
+				Record: rec,
+				Input:  ing.recordChan,
+			}
+
+			ing.queue.Push(job)
 		}
-
-		ing.log.Debug("Storage handling informer event for eI.Object",
-			slog.String("name", eI.Obj.GetName()),
-			slog.String("apiversion", eI.Obj.GetAPIVersion()),
-			slog.String("kind", eI.Obj.GetKind()),
-			slog.String("compositionId", compositionId),
-		)
-
-		rec := ing.buildRecord(eI.Obj, compositionId)
-		if rec.UID == "" {
-			return fmt.Errorf("cannot store: UID is empty")
-		}
-
-		job := &batch.InsertRecordJob{
-			Record: rec,
-			Input:  ing.recordChan,
-		}
-
-		ing.queue.Push(job)
 
 		return nil
 	})
@@ -118,13 +133,7 @@ func (ing *storage) Run(stop <-chan struct{}) {
 	ing.log.Info("Storage stopped")
 }
 
-func (ing *storage) buildRecord(obj unstructured.Unstructured, compositionID string) batch.InsertRecord {
-	labels := obj.GetLabels()
-	if labels == nil {
-		labels = map[string]string{}
-	}
-	labels[keyCompositionID] = compositionID
-
+func (ing *storage) buildRecord(obj *unstructured.Unstructured, compositionID string) batch.InsertRecord {
 	api := obj.GetAPIVersion()
 	kind := obj.GetKind()
 	resourceKind := kind
@@ -132,28 +141,18 @@ func (ing *storage) buildRecord(obj unstructured.Unstructured, compositionID str
 		resourceKind = api + "." + kind
 	}
 
-	cid := pgtype.UUID{Valid: false}
-	if compositionID != "" {
-		uid, err := uuid.Parse(compositionID)
-		if err == nil {
-			cid = pgtype.UUID{
-				Bytes: uid,
-				Valid: true,
-			}
-		}
-	}
-
 	raw, _ := json.Marshal(obj.Object)
 
 	return batch.InsertRecord{
-		ClusterName:     ing.clusterName,
-		UID:             string(obj.GetUID()),
-		GlobalUID:       fmt.Sprintf("%s:%s", ing.clusterName, string(obj.GetUID())),
-		Namespace:       obj.GetNamespace(),
-		ResourceKind:    resourceKind,
-		ResourceName:    obj.GetName(),
-		CompositionID:   cid,
-		ResourceVersion: obj.GetResourceVersion(),
-		Raw:             raw,
+		ClusterName:       ing.clusterName,
+		UID:               string(obj.GetUID()),
+		GlobalUID:         fmt.Sprintf("%s:%s", ing.clusterName, string(obj.GetUID())),
+		Namespace:         obj.GetNamespace(),
+		ResourceKind:      resourceKind,
+		ResourceName:      obj.GetName(),
+		CompositionID:     compositionID,
+		ResourceVersion:   obj.GetResourceVersion(),
+		Raw:               raw,
+		DeletionTimestamp: obj.GetDeletionTimestamp(),
 	}
 }

@@ -20,10 +20,10 @@ const (
 )
 
 type InformerEvent struct {
-	Name        string                    `json:"name"`
-	EventType   Operation                 `json:"eventType"`
-	EventTarget Target                    `json:"eventTarget"`
-	Obj         unstructured.Unstructured `json:"obj"`
+	Name        string                     `json:"name"`
+	EventType   Operation                  `json:"eventType"`
+	EventTarget Target                     `json:"eventTarget"`
+	Obj         *unstructured.Unstructured `json:"obj"`
 }
 
 func (InformerEvent) EventID() eventbus.EventID {

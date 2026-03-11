@@ -41,8 +41,6 @@ func main() {
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	storage.StartCacheCleaner(rootCtx, 2*time.Minute)
-
 	pgCtx, cancel := context.WithTimeout(rootCtx, cfg.DbReadyTimeout)
 	defer cancel()
 
