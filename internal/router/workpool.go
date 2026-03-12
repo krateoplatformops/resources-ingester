@@ -3,7 +3,6 @@ package router
 import (
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -54,11 +53,10 @@ func NewWorkerPool(
 	}
 }
 
-func (p *WorkerPool) RegisterInformer(gvr schema.GroupVersionResource, namespace string, inf cache.SharedInformer) {
-	key := fmt.Sprintf("%s/%s/%s|%s", gvr.Group, gvr.Version, gvr.Resource, namespace)
+func (p *WorkerPool) RegisterInformer(gvr schema.GroupVersionResource, ns string, kind string, inf cache.SharedInformer) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.informers[key] = inf
+	p.informers[getInformerKey(gvr, kind, ns)] = inf
 }
 
 func (p *WorkerPool) Start(stop <-chan struct{}) {
@@ -119,35 +117,42 @@ func (p *WorkerPool) addDeletedObject(fullKey string, objUn *unstructured.Unstru
 }
 
 func (p *WorkerPool) reconcile(fullKey string) error {
-	gvr, nsName, err := splitKey(fullKey)
+	g, v, r, k, ns, n, err := splitKey(fullKey)
 	if err != nil {
 		return err
 	}
 
 	target := STORAGE
-	if strings.Split(gvr, "/")[0] == "apiextensions.k8s.io" {
+	if g == "apiextensions.k8s.io" {
 		target = MANAGER
 	}
 
-	// nsName is "namespace/name" for namespaced or "name" for cluster-scoped
-	ns, _, err := cache.SplitMetaNamespaceKey(nsName)
-	if err != nil {
-		return err
+	gvr := schema.GroupVersionResource{
+		Group:    g,
+		Version:  v,
+		Resource: r,
 	}
-
 	p.mu.RLock()
-	informerKey := fmt.Sprintf("%s|%s", gvr, ns)
+	informerKey := getInformerKey(gvr, k, ns)
 	informer, ok := p.informers[informerKey]
-	if !ok {
-		informer, ok = p.informers[fmt.Sprintf("%s|", gvr)]
-	}
+	// infKeys := make([]string, len(p.informers))
+	// i := 0
+	// for k := range p.informers {
+	// 	infKeys[i] = k
+	// 	i++
+	// }
 	p.mu.RUnlock()
 	if !ok {
-		p.log.Error("no informer", "gvr", gvr)
-		return fmt.Errorf("no informer for %s in namespace %q", gvr, ns)
+		informerKey = getInformerKey(gvr, k, "")
+		informer, ok = p.informers[informerKey]
+		if !ok {
+			p.log.Error("no informer", "gvr", informerKey)
+			// p.log.Debug("informer keys", "list", infKeys)
+			return fmt.Errorf("no informer for %s in namespace %q", gvr, ns)
+		}
 	}
 
-	obj, exists, err := informer.GetStore().GetByKey(nsName)
+	obj, exists, err := informer.GetStore().GetByKey(getObjectKey(ns, n))
 	if err != nil {
 		p.log.Warn("no object in store", "exists", exists, "err", err)
 		return err
@@ -160,11 +165,11 @@ func (p *WorkerPool) reconcile(fullKey string) error {
 		}
 		objUn := (val.(*unstructured.Unstructured))
 		p.delObjs.Delete(fullKey)
-		p.handler.Handle(objUn, DELETE, target)
+		p.handler.Handle(objUn, DELETE, target, r)
 		return nil
 	}
 
 	un := obj.(*unstructured.Unstructured)
-	p.handler.Handle(un, UPDATE, target)
+	p.handler.Handle(un, UPDATE, target, r)
 	return nil
 }

@@ -21,12 +21,12 @@ func GetGVR(gvk schema.GroupVersionKind) (schema.GroupVersionResource, error) {
 // This function returns the GVR for the CRs to watch for a given CRD and also tells whether its cluster or namespaced-scoped
 // Includes all versions
 // Static
-func ExtractGvrNsFromCrd(crd *unstructured.Unstructured) ([]schema.GroupVersionResource, bool) {
+func ExtractGvrkNsFromCrd(crd *unstructured.Unstructured) ([]schema.GroupVersionResource, string, bool) {
 	res := []schema.GroupVersionResource{}
 
 	spec, ok := crd.Object["spec"].(map[string]interface{})
 	if !ok {
-		return res, false
+		return res, "", false
 	}
 
 	scope, _ := spec["scope"].(string)
@@ -36,13 +36,14 @@ func ExtractGvrNsFromCrd(crd *unstructured.Unstructured) ([]schema.GroupVersionR
 
 	names, ok := spec["names"].(map[string]interface{})
 	if !ok {
-		return res, namespaced
+		return res, "", namespaced
 	}
 	kind, _ := names["kind"].(string)
+	plural, _ := names["plural"].(string)
 
 	versions, ok := spec["versions"].([]interface{})
 	if !ok {
-		return res, namespaced
+		return res, "", namespaced
 	}
 
 	for _, v := range versions {
@@ -55,17 +56,13 @@ func ExtractGvrNsFromCrd(crd *unstructured.Unstructured) ([]schema.GroupVersionR
 			continue
 		}
 
-		gv := schema.GroupVersionKind{
-			Group:   group,
-			Version: version,
-			Kind:    kind,
-		}
-		gvr, err := GetGVR(gv)
-		if err != nil {
-			continue
+		gvr := schema.GroupVersionResource{
+			Group:    group,
+			Version:  version,
+			Resource: plural,
 		}
 		res = append(res, gvr)
 	}
 
-	return res, namespaced
+	return res, kind, namespaced
 }

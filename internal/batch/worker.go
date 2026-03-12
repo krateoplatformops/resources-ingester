@@ -103,7 +103,7 @@ func (w *Worker) flush() {
 func (w *Worker) sync() {
 	ctx := context.Background()
 	var b strings.Builder
-	b.WriteString("INSERT INTO k8s_resources (")
+	b.WriteString("INSERT INTO krateo_resources (")
 	b.WriteString(strings.Join(w.columns, ", "))
 	b.WriteString(") VALUES ")
 	vals := make([]any, 0, len(w.buffer)*len(w.columns))
@@ -121,21 +121,24 @@ func (w *Worker) sync() {
 			fmt.Fprintf(&b, "$%d", len(vals)+j+1)
 		}
 		b.WriteString(")")
-		var dt *string
-		if r.DeletionTimestamp != nil {
-			dts := r.DeletionTimestamp.UTC().Format(time.RFC3339)
-			dt = &dts
+		var da *time.Time
+		if r.DeletedAt != nil {
+			das := r.DeletedAt.UTC()
+			da = &das
 		}
-		vals = append(vals, r.ClusterName, r.UID, r.GlobalUID,
-			r.Namespace, r.ResourceKind, r.ResourceName,
-			r.CompositionID, r.Raw, r.ResourceVersion, dt,
+		cas := r.CreatedAt.UTC()
+		ca := &cas
+		uas := r.UpdatedAt.UTC()
+		ua := &uas
+		vals = append(vals, ca, ua, da, r.ClusterName, r.UID, r.GlobalUID,
+			r.Namespace, r.ResourceGroup, r.ResourceVersion, r.ResourceKind, r.ResourcePlural, r.ResourceName,
+			r.CompositionID, r.Raw,
 		)
 	}
 	b.WriteString(`
-		ON CONFLICT (cluster_name, uid) DO UPDATE SET
-			deletion_timestamp = EXCLUDED.deletion_timestamp,
-			raw = EXCLUDED.raw,
-			resource_version = EXCLUDED.resource_version
+		ON CONFLICT (global_uid) DO UPDATE SET
+			deleted_at = EXCLUDED.deleted_at,
+			raw = EXCLUDED.raw
 	`)
 	if len(vals) == 0 {
 		w.log.Debug("nothing to sync, skipping")
@@ -156,7 +159,7 @@ func (w *Worker) delete() {
 	vals := make([]any, 0, len(w.buffer))
 	paramIndex := 1
 	for i, r := range w.buffer {
-		if r.DeletionTimestamp != nil {
+		if r.DeletedAt != nil {
 			if paramIndex > 1 {
 				b.WriteString(", ")
 			}

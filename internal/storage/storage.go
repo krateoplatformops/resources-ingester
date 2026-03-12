@@ -13,7 +13,9 @@ import (
 	"github.com/krateoplatformops/resources-ingester/internal/queue"
 	"github.com/krateoplatformops/resources-ingester/internal/router"
 
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/rest"
 )
@@ -65,64 +67,47 @@ func (ing *storage) Run(stop <-chan struct{}) {
 
 		switch eI.EventType {
 		case router.CREATE, router.UPDATE:
-			compositionId, ok := hasCompositionId(eI.Obj)
-			if !ok {
-				ing.log.Warn("CompositionId not found",
-					slog.String("name", eI.Obj.GetName()),
-					slog.String("apiversion", eI.Obj.GetAPIVersion()),
-					slog.String("kind", eI.Obj.GetKind()),
-					slog.String("compositionId", compositionId),
-				)
+			// Remove the deletion timestamp until the resource is actually deleted
+			if eI.Obj.GetDeletionTimestamp() != nil {
+				eI.Obj.SetDeletionTimestamp(nil)
 			}
-
-			ing.log.Debug("Storage handling informer event for eI.Object",
-				slog.String("name", eI.Obj.GetName()),
-				slog.String("apiversion", eI.Obj.GetAPIVersion()),
-				slog.String("kind", eI.Obj.GetKind()),
-				slog.String("compositionId", compositionId),
-			)
-
-			rec := ing.buildRecord(eI.Obj, compositionId)
-			if rec.UID == "" {
-				return fmt.Errorf("cannot store: UID is empty")
-			}
-
-			job := &batch.InsertRecordJob{
-				Record: rec,
-				Input:  ing.recordChan,
-			}
-
-			ing.queue.Push(job)
 		case router.DELETE:
-			compositionId, ok := hasCompositionId(eI.Obj)
-			if !ok {
-				ing.log.Warn("CompositionId not found",
-					slog.String("name", eI.Obj.GetName()),
-					slog.String("apiversion", eI.Obj.GetAPIVersion()),
-					slog.String("kind", eI.Obj.GetKind()),
-					slog.String("compositionId", compositionId),
-				)
+			if eI.Obj.GetDeletionTimestamp() == nil {
+				now := v1.Now()
+				eI.Obj.SetDeletionTimestamp(&now)
 			}
-
-			ing.log.Debug("Storage handling informer event for eI.Object",
+		}
+		compositionId, ok := hasCompositionId(eI.Obj)
+		if !ok {
+			ing.log.Warn("CompositionId not found",
 				slog.String("name", eI.Obj.GetName()),
 				slog.String("apiversion", eI.Obj.GetAPIVersion()),
 				slog.String("kind", eI.Obj.GetKind()),
 				slog.String("compositionId", compositionId),
 			)
-
-			rec := ing.buildRecord(eI.Obj, compositionId)
-			if rec.UID == "" {
-				return fmt.Errorf("cannot store: UID is empty")
-			}
-
-			job := &batch.InsertRecordJob{
-				Record: rec,
-				Input:  ing.recordChan,
-			}
-
-			ing.queue.Push(job)
 		}
+
+		ing.log.Debug("Storage handling informer event for eI.Object",
+			slog.String("name", eI.Obj.GetName()),
+			slog.String("apiversion", eI.Obj.GetAPIVersion()),
+			slog.String("kind", eI.Obj.GetKind()),
+			slog.String("compositionId", compositionId),
+		)
+
+		rec := ing.buildRecord(eI.Obj, compositionId, eI.Resource)
+		if rec == nil {
+			return fmt.Errorf("cannot store: error generating record")
+		}
+		if rec.UID == "" {
+			return fmt.Errorf("cannot store: UID is empty")
+		}
+
+		job := &batch.InsertRecordJob{
+			Record: *rec,
+			Input:  ing.recordChan,
+		}
+
+		ing.queue.Push(job)
 
 		return nil
 	})
@@ -133,26 +118,35 @@ func (ing *storage) Run(stop <-chan struct{}) {
 	ing.log.Info("Storage stopped")
 }
 
-func (ing *storage) buildRecord(obj *unstructured.Unstructured, compositionID string) batch.InsertRecord {
+func (ing *storage) buildRecord(obj *unstructured.Unstructured, compositionID string, resource string) *batch.InsertRecord {
 	api := obj.GetAPIVersion()
-	kind := obj.GetKind()
-	resourceKind := kind
-	if api != "" {
-		resourceKind = api + "." + kind
+	gv, err := schema.ParseGroupVersion(api)
+	if err != nil {
+		return nil
 	}
+	kind := obj.GetKind()
 
 	raw, _ := json.Marshal(obj.Object)
+	ca := obj.GetCreationTimestamp()
+	ua := v1.Now()
+	return &batch.InsertRecord{
+		CreatedAt: &ca,
+		UpdatedAt: &ua,
+		DeletedAt: obj.GetDeletionTimestamp(),
 
-	return batch.InsertRecord{
-		ClusterName:       ing.clusterName,
-		UID:               string(obj.GetUID()),
-		GlobalUID:         fmt.Sprintf("%s:%s", ing.clusterName, string(obj.GetUID())),
-		Namespace:         obj.GetNamespace(),
-		ResourceKind:      resourceKind,
-		ResourceName:      obj.GetName(),
-		CompositionID:     compositionID,
-		ResourceVersion:   obj.GetResourceVersion(),
-		Raw:               raw,
-		DeletionTimestamp: obj.GetDeletionTimestamp(),
+		ClusterName: ing.clusterName,
+		UID:         string(obj.GetUID()),
+		GlobalUID:   fmt.Sprintf("%s:%s", ing.clusterName, string(obj.GetUID())),
+
+		Namespace:       obj.GetNamespace(),
+		ResourceName:    obj.GetName(),
+		ResourceGroup:   gv.Group,
+		ResourceVersion: gv.Version,
+		ResourceKind:    kind,
+		ResourcePlural:  resource,
+
+		CompositionID: compositionID,
+
+		Raw: raw,
 	}
 }

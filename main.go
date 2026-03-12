@@ -33,6 +33,7 @@ const (
 	crdGroup    = "apiextensions.k8s.io"
 	crdVersion  = "v1"
 	crdResource = "customresourcedefinitions"
+	crdKind     = "CustomResourceDefinition"
 )
 
 func main() {
@@ -155,6 +156,7 @@ func main() {
 		ResyncInterval: 8 * time.Hour, // TODO make configurable
 		WgPool:         nil,
 		Queue:          q,
+		Kind:           crdKind,
 		Namespaces:     []string{},
 		Gvr: schema.GroupVersionResource{
 			Group:    crdGroup,
@@ -167,7 +169,7 @@ func main() {
 			Group:    crdGroup,
 			Version:  crdVersion,
 			Resource: crdResource,
-		}, ns, inf)
+		}, ns, crdKind, inf)
 	}
 	go crdsRouter.Run(rootCtx.Done())
 

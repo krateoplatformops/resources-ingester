@@ -80,7 +80,7 @@ func (m *manager) Run(stop <-chan struct{}) {
 		}
 		m.log.Debug("Manager received event on eventbus", "obj", eI.Name, "kind", eI.Obj.GetKind())
 		if eI.Obj.GetKind() == "CustomResourceDefinition" {
-			gvrs, namespaced := util.ExtractGvrNsFromCrd(eI.Obj)
+			gvrs, kind, namespaced := util.ExtractGvrkNsFromCrd(eI.Obj)
 			// Gvrs will differ only in version, we can check the first one's group for compositions
 			if len(gvrs) > 0 {
 				if gvrs[0].Group != "composition.krateo.io" {
@@ -101,7 +101,7 @@ func (m *manager) Run(stop <-chan struct{}) {
 				switch eI.EventType {
 				case router.CREATE:
 					m.log.Debug("Starting router", "gvr", gvr.String())
-					m.startInformer(mgrCtx, gvr, namespaces)
+					m.startInformer(mgrCtx, gvr, kind, namespaces)
 				case router.DELETE:
 					m.log.Debug("Stopping router", "gvr", gvr.String())
 					stopInformer(m.informers, gvr.String(), m.mu)
@@ -113,7 +113,7 @@ func (m *manager) Run(stop <-chan struct{}) {
 						m.log.Debug("Stopped router", "gvr", gvr.String())
 					} else {
 						m.log.Debug("Starting router", "gvr", gvr.String())
-						m.startInformer(mgrCtx, gvr, namespaces)
+						m.startInformer(mgrCtx, gvr, kind, namespaces)
 					}
 				}
 			}
@@ -136,8 +136,8 @@ func (m *manager) GetInformers() int {
 	return len(m.informers)
 }
 
-func (m *manager) startInformer(parent context.Context, gvr schema.GroupVersionResource, namespaces []string) {
-	if gvr.Empty() {
+func (m *manager) startInformer(parent context.Context, gvr schema.GroupVersionResource, kind string, namespaces []string) {
+	if gvr.Empty() || gvr.Version == "vacuum" {
 		return
 	}
 
@@ -160,6 +160,7 @@ func (m *manager) startInformer(parent context.Context, gvr schema.GroupVersionR
 		WgPool:         m.wgpool,
 		Namespaces:     namespaces,
 		Gvr:            gvr,
+		Kind:           kind,
 	})
 	go crdsRouter.Run(ctx.Done())
 }

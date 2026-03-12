@@ -1,11 +1,15 @@
 -- Ordered list of columns used by COPY
+created_at,
+updated_at,
+deleted_at,
 cluster_name,
 uid,
 global_uid,
 namespace,
+resource_group,
+resource_version,
 resource_kind,
+resource_plural,
 resource_name,
 composition_id,
-raw,
-resource_version,
-deletion_timestamp
+raw

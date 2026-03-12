@@ -22,7 +22,7 @@ const (
 )
 
 type EventHandler interface {
-	Handle(o *unstructured.Unstructured, op Operation, tg Target)
+	Handle(o *unstructured.Unstructured, op Operation, tg Target, kind string)
 }
 
 type Router struct {
@@ -31,6 +31,7 @@ type Router struct {
 	log        *slog.Logger
 	namespaces []string
 	Gvr        schema.GroupVersionResource
+	kind       string
 	queue      workqueue.TypedRateLimitingInterface[string]
 	mu         sync.Mutex
 	wgpool     *WorkerPool
@@ -45,6 +46,7 @@ type RouterOpts struct {
 	Namespaces     []string
 	Gvr            schema.GroupVersionResource
 	WgPool         *WorkerPool
+	Kind           string
 }
 
 func NewRouter(opts RouterOpts) *Router {
@@ -69,7 +71,7 @@ func NewRouter(opts RouterOpts) *Router {
 		informers = append(informers, inf)
 
 		if opts.WgPool != nil {
-			opts.WgPool.RegisterInformer(opts.Gvr, ns, inf)
+			opts.WgPool.RegisterInformer(opts.Gvr, ns, opts.Kind, inf)
 		}
 	}
 
@@ -81,6 +83,7 @@ func NewRouter(opts RouterOpts) *Router {
 		queue:      opts.Queue,
 		namespaces: namespaces,
 		wgpool:     opts.WgPool,
+		kind:       opts.Kind,
 	}
 }
 
@@ -121,12 +124,11 @@ func (r *Router) Run(stop <-chan struct{}) {
 }
 
 func (r *Router) enqueue(obj any) {
-	key, err := cache.MetaNamespaceKeyFunc(obj)
+	fullKey, err := buildKey(r.Gvr, r.kind, obj)
 	if err != nil {
-		r.log.Error("failed building key", "err", err)
+		r.log.Error("could not build object key", "error", err)
 		return
 	}
-	fullKey := buildKey(r.Gvr, key)
 
 	objUn := obj.(*unstructured.Unstructured)
 	if objUn.GetDeletionTimestamp() != nil && r.wgpool != nil {
@@ -171,9 +173,14 @@ func (r *Router) onDelete(obj any) {
 		return
 	}
 
-	if objUn.GetDeletionTimestamp() == nil {
-		now := metav1.Now()
-		objUn.SetDeletionTimestamp(&now)
+	fullKey, err := buildKey(r.Gvr, r.kind, obj)
+	if err != nil {
+		r.log.Error("could not build object key", "error", err)
+		return
+	}
+
+	if r.wgpool != nil {
+		r.wgpool.addDeletedObject(fullKey, objUn)
 	}
 
 	r.enqueue(objUn)

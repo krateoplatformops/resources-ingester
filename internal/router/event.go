@@ -24,6 +24,7 @@ type InformerEvent struct {
 	EventType   Operation                  `json:"eventType"`
 	EventTarget Target                     `json:"eventTarget"`
 	Obj         *unstructured.Unstructured `json:"obj"`
+	Resource    string                     `json:"resource"`
 }
 
 func (InformerEvent) EventID() eventbus.EventID {

@@ -31,13 +31,14 @@ type ingester struct {
 	eventbus    eventbus.Bus
 }
 
-func (ing *ingester) Handle(obj *unstructured.Unstructured, op Operation, tg Target) {
+func (ing *ingester) Handle(obj *unstructured.Unstructured, op Operation, tg Target, r string) {
 	if obj != nil {
 		ing.eventbus.PublishAsync(context.Background(), InformerEvent{
 			Name:        obj.GetName(),
 			EventType:   op,
 			EventTarget: tg,
 			Obj:         obj,
+			Resource:    r,
 		})
 	}
 }
