@@ -43,6 +43,10 @@ service:
   type: ClusterIP
   port: 8082
 
+metrics:
+  type: ClusterIP
+  port: 9090
+
 resources: {}
   # We usually recommend not to specify default resources and to leave this as a conscious
   # choice for the user. This also increases chances charts run on environments with little
@@ -62,12 +66,12 @@ livenessProbe:
   initialDelaySeconds: 45
   periodSeconds: 90
 
-readinessProbe: {}
-  # httpGet:
-  #   path: /readyz
-  #   port: http
-  # initialDelaySeconds: 45
-  # periodSeconds: 90
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  initialDelaySeconds: 45
+  periodSeconds: 90
 
 autoscaling:
   enabled: false
@@ -122,6 +126,8 @@ config:
 
   # Extra query parameters (e.g. sslmode=disable&connect_timeout=5)
   DB_PARAMS: "sslmode=disable&connect_timeout=5"
+
+  # DB_NAME: "testdb"
 
   # Database username
   # DB_USER: ""
