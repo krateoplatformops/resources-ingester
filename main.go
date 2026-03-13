@@ -22,18 +22,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 
 	"github.com/krateoplatformops/plumbing/eventbus"
-)
-
-const (
-	crdGroup    = "apiextensions.k8s.io"
-	crdVersion  = "v1"
-	crdResource = "customresourcedefinitions"
-	crdKind     = "CustomResourceDefinition"
 )
 
 func main() {
@@ -148,30 +140,8 @@ func main() {
 	}
 	go infManager.Run(rootCtx.Done())
 
-	// Default Router for CRDs
-	crdsRouter := router.NewRouter(router.RouterOpts{
-		DynamicClient:  client,
-		Log:            cfg.Log,
-		Handler:        ing,
-		ResyncInterval: 8 * time.Hour, // TODO make configurable
-		WgPool:         nil,
-		Queue:          q,
-		Kind:           crdKind,
-		Namespaces:     []string{},
-		Gvr: schema.GroupVersionResource{
-			Group:    crdGroup,
-			Version:  crdVersion,
-			Resource: crdResource,
-		},
-	})
-	for ns, inf := range crdsRouter.InformersByNamespace() {
-		wgpool.RegisterInformer(schema.GroupVersionResource{
-			Group:    crdGroup,
-			Version:  crdVersion,
-			Resource: crdResource,
-		}, ns, crdKind, inf)
-	}
-	go crdsRouter.Run(rootCtx.Done())
+	// Static Routers from internal/router/ (including CRDs)
+	router.NewStaticRouters(rootCtx, client, cfg.Log, ing, q, wgpool, router.MustLoad("static"))
 
 	// Monitor buffer
 	go func() {

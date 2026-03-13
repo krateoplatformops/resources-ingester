@@ -32,7 +32,7 @@ type Router struct {
 	namespaces []string
 	Gvr        schema.GroupVersionResource
 	kind       string
-	queue      workqueue.TypedRateLimitingInterface[string]
+	queue      workqueue.TypedRateLimitingInterface[QueueItem]
 	mu         sync.Mutex
 	wgpool     *WorkerPool
 }
@@ -42,7 +42,7 @@ type RouterOpts struct {
 	Log            *slog.Logger
 	Handler        EventHandler
 	ResyncInterval time.Duration
-	Queue          workqueue.TypedRateLimitingInterface[string]
+	Queue          workqueue.TypedRateLimitingInterface[QueueItem]
 	Namespaces     []string
 	Gvr            schema.GroupVersionResource
 	WgPool         *WorkerPool
@@ -123,20 +123,14 @@ func (r *Router) Run(stop <-chan struct{}) {
 	r.log.Info("Router stopped", "gvr", r.Gvr.String())
 }
 
-func (r *Router) enqueue(obj any) {
+func (r *Router) enqueue(obj any, deletedObj *unstructured.Unstructured) {
 	fullKey, err := buildKey(r.Gvr, r.kind, obj)
 	if err != nil {
 		r.log.Error("could not build object key", "error", err)
 		return
 	}
-
-	objUn := obj.(*unstructured.Unstructured)
-	if objUn.GetDeletionTimestamp() != nil && r.wgpool != nil {
-		r.wgpool.addDeletedObject(fullKey, objUn)
-	}
-
 	r.log.Debug("Adding to queue", "fullKey", fullKey)
-	r.queue.Add(fullKey)
+	r.queue.Add(QueueItem{Key: fullKey, Object: deletedObj})
 }
 
 func (r *Router) onAdd(obj any) {
@@ -145,22 +139,22 @@ func (r *Router) onAdd(obj any) {
 		r.log.Error("onAdd: unexpected object type", "type", fmt.Sprintf("%T", obj))
 		return
 	}
-
-	r.enqueue(objUn)
+	r.enqueue(objUn, nil)
 }
-
 func (r *Router) onUpdate(oldObj, newObj any) {
 	oldObjUn, ok1 := oldObj.(*unstructured.Unstructured)
 	newObjUn, ok2 := newObj.(*unstructured.Unstructured)
 	if !ok1 || !ok2 {
 		return
 	}
-
 	if oldObjUn.GetResourceVersion() == newObjUn.GetResourceVersion() {
 		return
 	}
-
-	r.enqueue(newObjUn)
+	if newObjUn.GetDeletionTimestamp() != nil {
+		r.enqueue(newObjUn, newObjUn)
+		return
+	}
+	r.enqueue(newObjUn, nil)
 }
 
 func (r *Router) onDelete(obj any) {
@@ -172,18 +166,7 @@ func (r *Router) onDelete(obj any) {
 		r.log.Error("onDelete: unexpected object type", "type", fmt.Sprintf("%T", obj))
 		return
 	}
-
-	fullKey, err := buildKey(r.Gvr, r.kind, obj)
-	if err != nil {
-		r.log.Error("could not build object key", "error", err)
-		return
-	}
-
-	if r.wgpool != nil {
-		r.wgpool.addDeletedObject(fullKey, objUn)
-	}
-
-	r.enqueue(objUn)
+	r.enqueue(objUn, objUn)
 }
 
 func (r *Router) InformersByNamespace() map[string]cache.SharedInformer {

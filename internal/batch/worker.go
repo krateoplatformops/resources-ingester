@@ -102,13 +102,24 @@ func (w *Worker) flush() {
 
 func (w *Worker) sync() {
 	ctx := context.Background()
+
+	// Deduplicate: last write for a given global_uid wins
+	seen := make(map[string]InsertRecord, len(w.buffer))
+	for _, r := range w.buffer {
+		seen[r.GlobalUID] = r
+	}
+	records := make([]InsertRecord, 0, len(seen))
+	for _, r := range seen {
+		records = append(records, r)
+	}
+
 	var b strings.Builder
 	b.WriteString("INSERT INTO krateo_resources (")
 	b.WriteString(strings.Join(w.columns, ", "))
 	b.WriteString(") VALUES ")
-	vals := make([]any, 0, len(w.buffer)*len(w.columns))
+	vals := make([]any, 0, len(records)*len(w.columns))
 	firstRow := true
-	for _, r := range w.buffer {
+	for _, r := range records {
 		if !firstRow {
 			b.WriteString(", ")
 		}

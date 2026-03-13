@@ -12,18 +12,18 @@ import (
 	"k8s.io/client-go/util/workqueue"
 )
 
-func NewSharedQueue(throttlePeriod time.Duration) workqueue.TypedRateLimitingInterface[string] {
-	var rl workqueue.TypedRateLimiter[string]
+func NewSharedQueue(throttlePeriod time.Duration) workqueue.TypedRateLimitingInterface[QueueItem] {
+	var rl workqueue.TypedRateLimiter[QueueItem]
 	if throttlePeriod > 0 {
-		rl = workqueue.NewTypedItemExponentialFailureRateLimiter[string](throttlePeriod, 5*time.Minute)
+		rl = workqueue.NewTypedItemExponentialFailureRateLimiter[QueueItem](throttlePeriod, 5*time.Minute)
 	} else {
-		rl = workqueue.DefaultTypedControllerRateLimiter[string]()
+		rl = workqueue.DefaultTypedControllerRateLimiter[QueueItem]()
 	}
 	return workqueue.NewTypedRateLimitingQueue(rl)
 }
 
 type WorkerPool struct {
-	queue     workqueue.TypedRateLimitingInterface[string]
+	queue     workqueue.TypedRateLimitingInterface[QueueItem]
 	workers   int
 	log       *slog.Logger
 	handler   EventHandler
@@ -31,17 +31,15 @@ type WorkerPool struct {
 	wg        sync.WaitGroup
 	mu        sync.RWMutex
 	metrics   *WorkerPoolMetrics
-	delObjs   sync.Map
 }
 
 func NewWorkerPool(
-	queue workqueue.TypedRateLimitingInterface[string],
+	queue workqueue.TypedRateLimitingInterface[QueueItem],
 	workers int,
 	handler EventHandler,
 	logger *slog.Logger,
 	metrics *WorkerPoolMetrics,
 ) *WorkerPool {
-
 	return &WorkerPool{
 		queue:     queue,
 		workers:   workers,
@@ -49,7 +47,6 @@ func NewWorkerPool(
 		log:       logger,
 		informers: map[string]cache.SharedInformer{},
 		metrics:   metrics,
-		delObjs:   sync.Map{},
 	}
 }
 
@@ -65,7 +62,6 @@ func (p *WorkerPool) Start(stop <-chan struct{}) {
 			p.runWorker()
 		})
 	}
-
 	<-stop
 }
 
@@ -81,45 +77,43 @@ func (p *WorkerPool) runWorker() {
 
 func (p *WorkerPool) processNext() bool {
 	start := time.Now()
-	key, shutdown := p.queue.Get()
 
-	p.log.Debug("WorkerPool.processNext: dispatching",
-		"key", key,
-	)
+	item, shutdown := p.queue.Get()
 	if shutdown {
 		return false
 	}
-	defer p.queue.Done(key)
+	defer p.queue.Done(item)
 
-	err := p.reconcile(key)
+	p.log.Debug("WorkerPool.processNext: dispatching", "key", item.Key)
+
+	err := p.reconcile(item)
 	if err != nil {
 		p.metrics.errors.Inc()
-		if p.queue.NumRequeues(key) < 5 {
-			p.queue.AddRateLimited(key)
+		if p.queue.NumRequeues(item) < 5 {
+			p.queue.AddRateLimited(item)
 			return true
 		}
-		p.log.Error("dropping key after max retries", "key", key)
-		p.queue.Forget(key)
+		p.log.Error("dropping key after max retries", "key", item.Key)
+		p.queue.Forget(item)
 		return true
 	}
 
-	p.queue.Forget(key)
+	p.queue.Forget(item)
 	current := time.Since(start)
 	p.metrics.processed.Inc()
 	p.metrics.duration.Observe(current.Seconds())
-
 	p.log.Debug("WorkerPool.processNext: took", slog.Int64("time ms", current.Milliseconds()))
 	return true
 }
 
-func (p *WorkerPool) addDeletedObject(fullKey string, objUn *unstructured.Unstructured) {
-	p.delObjs.Store(fullKey, objUn)
-}
-
-func (p *WorkerPool) reconcile(fullKey string) error {
-	g, v, r, k, ns, n, err := splitKey(fullKey)
+func (p *WorkerPool) reconcile(item QueueItem) error {
+	g, v, r, k, ns, n, err := splitKey(item.Key)
 	if err != nil {
 		return err
+	}
+	if item.Object != nil {
+		p.handler.Handle(item.Object, DELETE, STORAGE, r)
+		return nil
 	}
 
 	target := STORAGE
@@ -127,27 +121,17 @@ func (p *WorkerPool) reconcile(fullKey string) error {
 		target = MANAGER
 	}
 
-	gvr := schema.GroupVersionResource{
-		Group:    g,
-		Version:  v,
-		Resource: r,
-	}
+	gvr := schema.GroupVersionResource{Group: g, Version: v, Resource: r}
+
 	p.mu.RLock()
 	informerKey := getInformerKey(gvr, k, ns)
 	informer, ok := p.informers[informerKey]
-	// infKeys := make([]string, len(p.informers))
-	// i := 0
-	// for k := range p.informers {
-	// 	infKeys[i] = k
-	// 	i++
-	// }
 	p.mu.RUnlock()
 	if !ok {
 		informerKey = getInformerKey(gvr, k, "")
 		informer, ok = p.informers[informerKey]
 		if !ok {
 			p.log.Error("no informer", "gvr", informerKey)
-			// p.log.Debug("informer keys", "list", infKeys)
 			return fmt.Errorf("no informer for %s in namespace %q", gvr, ns)
 		}
 	}
@@ -158,14 +142,7 @@ func (p *WorkerPool) reconcile(fullKey string) error {
 		return err
 	}
 	if !exists {
-		val, ok := p.delObjs.Load(fullKey)
-		if !ok {
-			p.log.Error("deleted object not in storage", "fullkey", fullKey, "ok", ok)
-			return fmt.Errorf("deleted object not found for key %s", fullKey)
-		}
-		objUn := (val.(*unstructured.Unstructured))
-		p.delObjs.Delete(fullKey)
-		p.handler.Handle(objUn, DELETE, target, r)
+		p.log.Debug("object no longer in store, skipping", "key", item.Key)
 		return nil
 	}
 

@@ -27,7 +27,7 @@ type ManagerOpts struct {
 
 	// Multiple namespaces or nil -> watch everything
 	Namespaces []string
-	Queue      workqueue.TypedRateLimitingInterface[string]
+	Queue      workqueue.TypedRateLimitingInterface[router.QueueItem]
 	WgPool     *router.WorkerPool
 }
 
@@ -44,6 +44,7 @@ func NewManager(opts ManagerOpts) (manager, error) {
 		queue:          opts.Queue,
 		mu:             &sync.RWMutex{},
 		wgpool:         opts.WgPool,
+		managedGroups:  parse(mustLoad("managed_groups")),
 	}, nil
 }
 
@@ -55,12 +56,13 @@ type manager struct {
 	resyncInterval time.Duration
 	throttlePeriod time.Duration
 	mu             *sync.RWMutex
-	queue          workqueue.TypedRateLimitingInterface[string]
+	queue          workqueue.TypedRateLimitingInterface[router.QueueItem]
 	wgpool         *router.WorkerPool
 
 	// Multiple namespaces or nil -> watch everything
-	Namespaces []string
-	informers  map[string]context.CancelFunc
+	Namespaces    []string
+	informers     map[string]context.CancelFunc
+	managedGroups map[string]struct{}
 }
 
 func (m *manager) Run(stop <-chan struct{}) {
@@ -82,10 +84,8 @@ func (m *manager) Run(stop <-chan struct{}) {
 		if eI.Obj.GetKind() == "CustomResourceDefinition" {
 			gvrs, kind, namespaced := util.ExtractGvrkNsFromCrd(eI.Obj)
 			// Gvrs will differ only in version, we can check the first one's group for compositions
-			if len(gvrs) > 0 {
-				if gvrs[0].Group != "composition.krateo.io" {
-					return nil
-				}
+			if len(gvrs) > 0 && !isManagedGroup(m.managedGroups, gvrs[0].Group) {
+				return nil
 			}
 
 			m.log.Debug("Group match for compositions", "obj", eI.Name)
@@ -117,10 +117,7 @@ func (m *manager) Run(stop <-chan struct{}) {
 					}
 				}
 			}
-		} else {
-
 		}
-
 		return nil
 	})
 	defer m.eventbus.Unsubscribe(sub)
