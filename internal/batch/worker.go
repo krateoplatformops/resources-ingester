@@ -143,7 +143,7 @@ func (w *Worker) sync() {
 		ua := &uas
 		vals = append(vals, ca, ua, da, r.ClusterName, r.UID, r.GlobalUID,
 			r.Namespace, r.ResourceGroup, r.ResourceVersion, r.ResourceKind, r.ResourcePlural, r.ResourceName,
-			r.CompositionID, r.Raw,
+			r.CompositionID, r.Raw, r.StatusRaw,
 		)
 	}
 	b.WriteString(`

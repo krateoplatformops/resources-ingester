@@ -127,6 +127,14 @@ func (ing *storage) buildRecord(obj *unstructured.Unstructured, compositionID st
 	kind := obj.GetKind()
 
 	raw, _ := json.Marshal(obj.Object)
+	status, ok := obj.Object["status"]
+	var statusRaw []byte
+	if ok {
+		statusRaw, _ = json.Marshal(status)
+	} else {
+		ing.log.Debug("Status not found", slog.String("name", obj.GetName()), slog.String("kind", obj.GetKind()))
+	}
+
 	ca := obj.GetCreationTimestamp()
 	ua := v1.Now()
 	return &batch.InsertRecord{
@@ -147,6 +155,7 @@ func (ing *storage) buildRecord(obj *unstructured.Unstructured, compositionID st
 
 		CompositionID: compositionID,
 
-		Raw: raw,
+		Raw:       raw,
+		StatusRaw: statusRaw,
 	}
 }

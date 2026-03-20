@@ -12,4 +12,5 @@ resource_kind,
 resource_plural,
 resource_name,
 composition_id,
-raw
+raw,
+status_raw

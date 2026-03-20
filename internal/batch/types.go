@@ -20,5 +20,6 @@ type InsertRecord struct {
 
 	CompositionID string
 
-	Raw []byte
+	Raw       []byte
+	StatusRaw []byte
 }
