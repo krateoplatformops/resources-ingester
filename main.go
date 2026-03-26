@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"github.com/krateoplatformops/plumbing/kubeutil"
-	"github.com/krateoplatformops/plumbing/pgutil"
 	"github.com/krateoplatformops/plumbing/server/probes"
 	"github.com/krateoplatformops/resources-ingester/internal/batch"
 	"github.com/krateoplatformops/resources-ingester/internal/config"
@@ -19,6 +19,7 @@ import (
 	"github.com/krateoplatformops/resources-ingester/internal/queue"
 	"github.com/krateoplatformops/resources-ingester/internal/router"
 	"github.com/krateoplatformops/resources-ingester/internal/storage"
+	"github.com/krateoplatformops/resources-ingester/internal/storage/pgcheck"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
@@ -37,9 +38,22 @@ func main() {
 	pgCtx, cancel := context.WithTimeout(rootCtx, cfg.DbReadyTimeout)
 	defer cancel()
 
-	pool, err := pgutil.WaitForPostgres(pgCtx, cfg.Log, cfg.DbURL)
+	pool, err := pgcheck.WaitForPostgres(pgCtx, cfg.Log, cfg.DbURL)
 	if err != nil {
-		cfg.Log.Error("cannot connect to PostgreSQL", slog.Any("err", err))
+		switch {
+		case errors.Is(err, pgcheck.ErrTableNotFound):
+			cfg.Log.Error("krateo_resources table missing", slog.Any("err", err))
+		case errors.Is(err, pgcheck.ErrSchemaMismatch):
+			var detail *pgcheck.SchemaMismatchError
+			errors.As(err, &detail)
+			cfg.Log.Error("krateo_resources schema mismatch",
+				slog.Any("missing", detail.Missing),
+				slog.Any("extra", detail.Extra),
+				slog.Any("mistyped", detail.Mistyped),
+			)
+		default:
+			cfg.Log.Error("cannot connect to PostgreSQL", slog.Any("err", err))
+		}
 		os.Exit(1)
 	}
 	defer pool.Close()
