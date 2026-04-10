@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -20,8 +19,7 @@ import (
 	"github.com/krateoplatformops/resources-ingester/internal/router"
 	"github.com/krateoplatformops/resources-ingester/internal/storage"
 	"github.com/krateoplatformops/resources-ingester/internal/storage/pgcheck"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/krateoplatformops/resources-ingester/internal/telemetry"
 
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
@@ -34,6 +32,21 @@ func main() {
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	metrics, shutdownMetrics, err := telemetry.Setup(rootCtx, cfg.Log, telemetry.Config{
+		Enabled:        cfg.OTelEnabled,
+		ServiceName:    "resources-ingester",
+		ExportInterval: cfg.OTelExportIntv,
+	})
+	if err != nil {
+		cfg.Log.Error("cannot initialize OpenTelemetry metrics", slog.Any("err", err))
+		os.Exit(1)
+	}
+	defer func() {
+		if err := shutdownMetrics(context.Background()); err != nil {
+			cfg.Log.Error("OpenTelemetry metrics shutdown failed", slog.Any("err", err))
+		}
+	}()
 
 	pgCtx, cancel := context.WithTimeout(rootCtx, cfg.DbReadyTimeout)
 	defer cancel()
@@ -88,6 +101,7 @@ func main() {
 		Input:      recordChan,
 		MaxBatch:   50,
 		FlushEvery: 5 * time.Second,
+		Metrics:    metrics,
 	})
 	go batchWorker.Run(rootCtx.Done())
 
@@ -126,7 +140,6 @@ func main() {
 	}
 
 	q := router.NewSharedQueue(5 * time.Minute)
-	metrics := router.NewWorkerPoolMetrics(prometheus.DefaultRegisterer)
 	wgpool := router.NewWorkerPool(
 		q,
 		10,
@@ -157,9 +170,26 @@ func main() {
 	// Static Routers from internal/router/ (including CRDs)
 	router.NewStaticRouters(rootCtx, client, cfg.Log, ing, q, wgpool, router.MustLoad("static"))
 
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-rootCtx.Done():
+				return
+			case <-ticker.C:
+				metrics.SetRecordChannelDepth(int64(len(recordChan)))
+				metrics.SetQueueDepth(int64(jobQueue.GetJobCount()))
+				metrics.SetGoRoutines(int64(runtime.NumGoroutine()))
+				metrics.SetActiveInformerKinds(int64(infManager.GetInformers()))
+			}
+		}
+	}()
+
 	// Monitor buffer
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(50 * time.Second)
 		defer ticker.Stop()
 
 		for {
@@ -176,9 +206,6 @@ func main() {
 			}
 		}
 	}()
-
-	http.Handle("/metrics", promhttp.Handler())
-	go http.ListenAndServe(":9090", nil)
 
 	cfg.Log.Info("Event ingester started")
 

@@ -1,11 +1,13 @@
 package router
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/krateoplatformops/resources-ingester/internal/telemetry"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/cache"
@@ -30,7 +32,7 @@ type WorkerPool struct {
 	informers map[string]cache.SharedInformer
 	wg        sync.WaitGroup
 	mu        sync.RWMutex
-	metrics   *WorkerPoolMetrics
+	metrics   *telemetry.Metrics
 }
 
 func NewWorkerPool(
@@ -38,7 +40,7 @@ func NewWorkerPool(
 	workers int,
 	handler EventHandler,
 	logger *slog.Logger,
-	metrics *WorkerPoolMetrics,
+	metrics *telemetry.Metrics,
 ) *WorkerPool {
 	return &WorkerPool{
 		queue:     queue,
@@ -88,7 +90,6 @@ func (p *WorkerPool) processNext() bool {
 
 	err := p.reconcile(item)
 	if err != nil {
-		p.metrics.errors.Inc()
 		if p.queue.NumRequeues(item) < 5 {
 			p.queue.AddRateLimited(item)
 			return true
@@ -100,9 +101,8 @@ func (p *WorkerPool) processNext() bool {
 
 	p.queue.Forget(item)
 	current := time.Since(start)
-	p.metrics.processed.Inc()
-	p.metrics.duration.Observe(current.Seconds())
 	p.log.Debug("WorkerPool.processNext: took", slog.Int64("time ms", current.Milliseconds()))
+	p.metrics.IncResourcesDispatched(context.Background())
 	return true
 }
 

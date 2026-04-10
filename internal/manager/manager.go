@@ -8,6 +8,7 @@ import (
 
 	"github.com/krateoplatformops/plumbing/eventbus"
 	"github.com/krateoplatformops/resources-ingester/internal/router"
+	"github.com/krateoplatformops/resources-ingester/internal/telemetry"
 	"github.com/krateoplatformops/resources-ingester/internal/util"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -29,6 +30,7 @@ type ManagerOpts struct {
 	Namespaces []string
 	Queue      workqueue.TypedRateLimitingInterface[router.QueueItem]
 	WgPool     *router.WorkerPool
+	Metrics    *telemetry.Metrics
 }
 
 func NewManager(opts ManagerOpts) (manager, error) {
@@ -45,6 +47,7 @@ func NewManager(opts ManagerOpts) (manager, error) {
 		mu:             &sync.RWMutex{},
 		wgpool:         opts.WgPool,
 		managedGroups:  parse(mustLoad("managed_groups")),
+		metrics:        opts.Metrics,
 	}, nil
 }
 
@@ -63,6 +66,7 @@ type manager struct {
 	Namespaces    []string
 	informers     map[string]context.CancelFunc
 	managedGroups map[string]struct{}
+	metrics       *telemetry.Metrics
 }
 
 func (m *manager) Run(stop <-chan struct{}) {
@@ -158,6 +162,7 @@ func (m *manager) startInformer(parent context.Context, gvr schema.GroupVersionR
 		Namespaces:     namespaces,
 		Gvr:            gvr,
 		Kind:           kind,
+		Metrics:        m.metrics,
 	})
 	go crdsRouter.Run(ctx.Done())
 }

@@ -127,7 +127,7 @@ config:
   # Extra query parameters (e.g. sslmode=disable&connect_timeout=5)
   DB_PARAMS: "sslmode=disable&connect_timeout=5"
 
-  # DB_NAME: "testdb"
+  DB_NAME: "testdb"
 
   # Database username
   # DB_USER: ""
@@ -136,12 +136,18 @@ config:
   # DB_PASS: ""
 
   # Database host
-  # DB_HOST: "localhost"
+  DB_HOST: "postgres.ingester-test.svc.cluster.local"
 
   # PostgreSQL port
-  # DB_PORT: "5432"
+  DB_PORT: "5432"
 
   # Comma separated list of namespaces to watch for events
   # NAMESPACES: "krateo-system"
+
+  # OpenTelemetry metrics (OTLP HTTP exporter)
+  OTEL_ENABLED: "true"
+  OTEL_EXPORT_INTERVAL: "50s"
+  # OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.monitoring.svc.cluster.local:4318"
+
 
   PORT: "8082"

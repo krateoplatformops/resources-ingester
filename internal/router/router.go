@@ -1,11 +1,13 @@
 package router
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/krateoplatformops/resources-ingester/internal/telemetry"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -35,6 +37,7 @@ type Router struct {
 	queue      workqueue.TypedRateLimitingInterface[QueueItem]
 	mu         sync.Mutex
 	wgpool     *WorkerPool
+	metrics    *telemetry.Metrics
 }
 
 type RouterOpts struct {
@@ -47,6 +50,7 @@ type RouterOpts struct {
 	Gvr            schema.GroupVersionResource
 	WgPool         *WorkerPool
 	Kind           string
+	Metrics        *telemetry.Metrics
 }
 
 func NewRouter(opts RouterOpts) *Router {
@@ -84,6 +88,7 @@ func NewRouter(opts RouterOpts) *Router {
 		namespaces: namespaces,
 		wgpool:     opts.WgPool,
 		kind:       opts.Kind,
+		metrics:    opts.Metrics,
 	}
 }
 
@@ -125,8 +130,10 @@ func (r *Router) Run(stop <-chan struct{}) {
 
 func (r *Router) enqueue(obj any, deletedObj *unstructured.Unstructured) {
 	fullKey, err := buildKey(r.Gvr, r.kind, obj)
+	r.metrics.IncResourcesReceived(context.Background())
 	if err != nil {
 		r.log.Error("could not build object key", "error", err)
+		r.metrics.IncResourcesDropped(context.Background(), "same_resource_version")
 		return
 	}
 	r.log.Debug("Adding to queue", "fullKey", fullKey)
@@ -145,9 +152,11 @@ func (r *Router) onUpdate(oldObj, newObj any) {
 	oldObjUn, ok1 := oldObj.(*unstructured.Unstructured)
 	newObjUn, ok2 := newObj.(*unstructured.Unstructured)
 	if !ok1 || !ok2 {
+		r.metrics.IncResourcesDropped(context.Background(), "unsupported_object_type")
 		return
 	}
 	if oldObjUn.GetResourceVersion() == newObjUn.GetResourceVersion() {
+		r.metrics.IncResourcesDropped(context.Background(), "same_resource_version")
 		return
 	}
 	if newObjUn.GetDeletionTimestamp() != nil {
