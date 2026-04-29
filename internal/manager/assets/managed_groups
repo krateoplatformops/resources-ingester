@@ -2,3 +2,8 @@ composition.krateo.io
 widgets.templates.krateo.io
 core.krateo.io
 finops.krateo.io
+basic.authn.krateo.io
+oidc.authn.krateo.io
+oauth.authn.krateo.io
+ldap.authn.krateo.io
+ai.krateo.io
